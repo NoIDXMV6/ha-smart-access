@@ -1,0 +1,26 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "description": "Подключение к аддону Smart Access Core происходит автоматически через локальный MQTT. Нажмите «Отправить».",
+        "title": "Smart Access"
+      }
+    },
+    "abort": {
+      "already_configured": "Smart Access уже добавлен."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "car_subjects": "Имена машин (через запятую)",
+          "face_subjects": "Имена людей (через запятую)",
+          "enroll_map": "Привязка камер: camera.xxx=car:Моя машина (по строке на камеру)"
+        },
+        "description": "Кнопка «Обучить» на карточке берёт subject из привязки камеры. Если камеры нет в списке — используется первая машина из списка имён.",
+        "title": "Настройки Smart Access"
+      }
+    }
+  }
+}

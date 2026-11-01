@@ -1,0 +1,27 @@
+# Автоматизация: уведомление о допуске (НЕ спамит: срабатывает только на
+# факты открытия «своим», cooldown уже на стороне аддона).
+#
+# smart_access_event приходит от аддона smart-access-core по MQTT через интеграцию.
+# Поля события: kind (car|face), camera, camera_entity, subject, score, action.
+#
+# Вставка: Настройки → Автоматизации и сцены → Создать → Вручную → YAML.
+
+alias: Smart Access — уведомление о допуске
+description: >-
+  Пуш при автоматическом открытии шлагбаума/калитки «своим».
+  Не срабатывает на «чужих» — их обработка (лог/архив) ведётся аддоном.
+mode: single
+triggers:
+  - trigger: event
+    event_type: smart_access_event
+    event_data:
+      action: opened
+conditions: []
+actions:
+  - action: notify.persistent_notification
+    data:
+      title: Smart Access
+      message: >
+        {{ trigger.event.data.kind | upper }} «{{ trigger.event.data.subject }}»
+        открыл {{ trigger.event.data.camera }}
+        (совпадение {{ trigger.event.data.score }}).

@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Access — управление допуском</title>
+<style>
+  :root { --ok:#2e7d32; --warn:#ef6c00; --err:#c62828; --bg:#f5f6f8; --card:#fff; --line:#e3e6ea; }
+  * { box-sizing:border-box; font-family:system-ui,'Segoe UI',Roboto,sans-serif; }
+  body { margin:0; background:var(--bg); color:#1c2128; }
+  header { background:#0f2b46; color:#fff; padding:14px 22px; display:flex; align-items:center; gap:14px; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  .state { font-size:12px; padding:3px 10px; border-radius:12px; background:#37474f; }
+  .state.ok { background:var(--ok); } .state.degraded { background:var(--warn); }
+  main { max-width:1080px; margin:18px auto; padding:0 14px; display:grid; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; }
+  .card h2 { margin:0 0 10px; font-size:15px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  .pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; background:#eceff1; }
+  .pill.ok { background:#e8f5e9; color:var(--ok); } .pill.err { background:#ffebee; color:var(--err); }
+  button { border:0; border-radius:8px; padding:8px 14px; cursor:pointer; font-size:13px; background:#0f2b46; color:#fff; }
+  button.danger { background:var(--err); }
+  button.master-on { background:var(--ok); } button.master-off { background:var(--warn); }
+  textarea { width:100%; height:230px; font-family:ui-monospace,Consolas,monospace; font-size:12px;
+             border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .muted { color:#66707a; font-size:12px; }
+  .ev { font-size:12px; padding:4px 0; border-bottom:1px dashed var(--line); display:flex; gap:8px; }
+  .ev b { min-width:120px; }
+  input[type=text], input[type=file] { font-size:13px; padding:7px; border:1px solid var(--line); border-radius:8px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Smart Access</h1>
+  <span id="state" class="state">…</span>
+  <span style="flex:1"></span>
+  <button id="masterBtn" onclick="toggleMaster()">…</button>
+</header>
+<main>
+  <div class="card">
+    <h2>Состояние</h2>
+    <div id="status" class="muted">загрузка…</div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Машины («свои» на шлагбаум)</h2>
+      <table id="cars"><tr><th>Имя</th><th>Фото</th><th></th></tr></table>
+      <div class="row" style="margin-top:10px">
+        <input type="text" id="carName" placeholder="Например: Моя машина">
+        <input type="file" id="carPhoto" accept="image/*">
+        <button onclick="enroll('car')">Обучить</button>
+      </div>
+      <p class="muted">Сфотографируйте машину с камеры шлагбаума (или загрузите файл).
+      Система сама сделает 8 вариантов (ночь/дождь/снег/контражур) — это «пре-трейн» базы.</p>
+    </div>
+
+    <div class="card">
+      <h2>Лица (калитка/дверь)</h2>
+      <table id="faces"><tr><th>Имя</th><th>Фото</th><th></th></tr></table>
+      <div class="row" style="margin-top:10px">
+        <input type="text" id="faceName" placeholder="Например: Жена">
+        <input type="file" id="facePhoto" accept="image/*">
+        <button onclick="enroll('face')">Обучить</button>
+      </div>
+      <p class="muted">Крупное фото лица (анфас). Добавляйте 2–3 фото с разных ракурсов.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Журнал</h2>
+    <div id="events" class="muted">загрузка…</div>
+  </div>
+
+  <div class="card">
+    <h2>Конфиг Frigate (генератор)</h2>
+    <p class="muted">Скопируйте в «Настройки → Дополнения → Frigate → Конфигурация» (секция конфига).
+    Пароль брокера подставьте свой.</p>
+    <textarea id="frigateCfg" readonly></textarea>
+    <div class="row" style="margin-top:8px">
+      <button onclick="loadFrigate()">Сгенерировать</button>
+      <span class="muted">Детектор: OpenVINO на CPU — GPU не требуется.</span>
+    </div>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function refresh() {
+  try {
+    const st = await (await fetch('/api/status')).json();
+    $('state').textContent = st.state === 'ok' ? 'работает' : 'деградация';
+    $('state').className = 'state ' + st.state;
+    $('masterBtn').textContent = st.master_enable ? 'Авто-допуск: ВКЛ' : 'Авто-допуск: ВЫКЛ';
+    $('masterBtn').className = st.master_enable ? 'master-on' : 'master-off';
+    const rows = Object.entries(st.bridge||{}).map(([n,c]) =>
+      `<tr><td>${n}</td><td>${c.entity}</td><td><span class="pill ${c.failures>5?'err':'ok'}">сбоев: ${c.failures}</span></td><td>${c.url}</td></tr>`).join('');
+    $('status').innerHTML =
+      `<table><tr><th>Камера/мост</th><th>HA-сущность</th><th>Состояние</th><th>MJPEG для Frigate</th></tr>${rows}</table>
+       <p>Модели: ${Object.entries(st.models).map(([k,v])=>`<span class="pill ${v==='ok'?'ok':'err'}">${k}: ${v}</span>`).join(' ')}
+       &nbsp; Frigate: ${st.frigate?'<span class="pill ok">связь есть</span>':'<span class="pill err">нет связи</span>'}
+       &nbsp; MQTT: ${st.mqtt_host}
+       &nbsp; Событий: ${st.stats.events_seen}, допусков: ${st.stats.grants}, отказов: ${st.stats.denied}, VLM: ${st.stats.vlm_calls}</p>`;
+  } catch(e) { $('status').textContent = 'ошибка загрузки статуса'; }
+  try {
+    const s = await (await fetch('/api/subjects')).json();
+    fill('cars', s.cars, 'car'); fill('faces', s.faces, 'face');
+  } catch(e) {}
+  try {
+    const ev = (await (await fetch('/api/events')).json()).events || [];
+    $('events').innerHTML = ev.slice(0,20).map(e =>
+      `<div class="ev"><b>${new Date(e.ts*1000).toLocaleString()}</b><span class="pill">${e.kind}</span>
+       <span>${e.camera} — ${e.action}</span><span class="muted">${e.detail||''}</span></div>`).join('') || 'пусто';
+  } catch(e) {}
+}
+
+function fill(id, map, kind) {
+  const t = $(id);
+  t.innerHTML = '<tr><th>Имя</th><th>Фото</th><th></th></tr>' +
+    Object.entries(map||{}).map(([name,info]) =>
+      `<tr><td>${name}</td><td>${info.photos}</td>
+       <td><button class="danger" onclick="del('${kind}','${name.replace(/'/g,"\\'")}')">×</button></td></tr>`).join('') ||
+    `<tr><td colspan="3" class="muted">пусто — добавьте первое фото ниже</td></tr>`;
+}
+
+async function del(kind, subject) {
+  if (!confirm(`Удалить «${subject}» из базы?`)) return;
+  await fetch('/api/subjects/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({kind, subject})});
+  refresh();
+}
+
+async function enroll(kind) {
+  const name = $(kind==='car'?'carName':'faceName').value.trim();
+  const file = $(kind==='car'?'carPhoto':'facePhoto').files[0];
+  if (!name || !file) { alert('Укажите имя и выберите фото'); return; }
+  const fd = new FormData(); fd.append('kind', kind); fd.append('subject', name); fd.append('photo', file);
+  const r = await (await fetch('/api/enroll', {method:'POST', body: fd})).json();
+  alert(r.ok ? `Готово: +${r.added} эмбеддингов` : `Ошибка: ${r.error}`);
+  refresh();
+}
+
+async function toggleMaster() {
+  const st = await (await fetch('/api/status')).json();
+  await fetch('/api/master', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({enabled: !st.master_enable})});
+  refresh();
+}
+
+async function loadFrigate() { $('frigateCfg').value = await (await fetch('/api/frigate-config')).text(); }
+
+refresh(); setInterval(refresh, 5000);
+</script>
+</body>
+</html>

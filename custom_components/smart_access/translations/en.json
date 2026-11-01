@@ -1,0 +1,26 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "description": "Connects to the Smart Access Core add-on automatically via local MQTT. Press Submit.",
+        "title": "Smart Access"
+      }
+    },
+    "abort": {
+      "already_configured": "Smart Access is already added."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "car_subjects": "Car names (comma-separated)",
+          "face_subjects": "People names (comma-separated)",
+          "enroll_map": "Camera mapping: camera.xxx=car:My car (one per line)"
+        },
+        "description": "The «Train» button on cards takes the subject from the camera mapping. If the camera is not mapped, the first car name is used.",
+        "title": "Smart Access options"
+      }
+    }
+  }
+}

@@ -1,0 +1,84 @@
+# Карточка «Живое видео + кнопки Открыть / Обучить» — шлагбаум А.М.Видео
+# «1 шлагбаум (деревня Говорово)(15072)»  — v1.1.0
+#
+# Вставка: Панель → Изменить → Добавить карточку → Вручную → вставить → Сохранить.
+#
+# Новое в v1.1.0: кнопка «Обучить» (camera-plus) — снимает кадр с камеры и
+# добавляет его в базу «своих» машин аддона Smart Access Core. Имя берётся из
+# привязки камеры (Настройки → Интеграции → Smart Access → Настройки),
+# по умолчанию — «Моя машина».
+#
+# Требуется: аддон smart-access-core + интеграция Smart Access (HACS),
+# Mosquitto broker (для MQTT).
+
+type: picture-elements
+camera_view: live
+camera_image: camera.1_shlagbaum_derevnia_govorovo_15072_kamera
+title: Шлагбаум — деревня Говорово
+elements:
+  # Кнопка «Открыть шлагбаум» (поверх видео, справа внизу)
+  - type: state-icon
+    entity: button.1_shlagbaum_derevnia_govorovo_15072_otkryt
+    icon: mdi:boom-gate-arrow-up-outline
+    style:
+      top: 84%
+      left: 86%
+      color: white
+      background: rgba(0, 0, 0, 0.45)
+      border-radius: 50%
+      padding: 12px
+      transform: translate(-50%, -50%)
+    tap_action:
+      action: perform-action
+      perform_action: amvideo.open_barrier
+      target:
+        entity_id: button.1_shlagbaum_derevnia_govorovo_15072_otkryt
+      confirmation:
+        text: Открыть шлагбаум?
+
+  # Кнопка «Обучить» — кадр в базу «своих» машин (слева от кнопки открытия)
+  - type: icon
+    icon: mdi:camera-plus
+    style:
+      top: 84%
+      left: 70%
+      color: white
+      background: rgba(0, 0, 0, 0.45)
+      border-radius: 50%
+      padding: 10px
+      transform: translate(-50%, -50%)
+    tap_action:
+      action: perform-action
+      perform_action: smart_access.enroll
+      data:
+        entity_id: camera.1_shlagbaum_derevnia_govorovo_15072_kamera
+        subject: Моя машина
+        kind: car
+      confirmation:
+        text: Добавить текущий кадр в базу «Моя машина»?
+
+  # Кнопка «во весь экран» — диалог с живым видео (слева внизу)
+  - type: icon
+    icon: mdi:arrow-expand-all
+    style:
+      top: 84%
+      left: 14%
+      color: white
+      background: rgba(0, 0, 0, 0.45)
+      border-radius: 50%
+      padding: 10px
+      transform: translate(-50%, -50%)
+    tap_action:
+      action: more-info
+      entity: camera.1_shlagbaum_derevnia_govorovo_15072_kamera
+
+  # Подпись: состояние шлагбаума (Закрыто / Открывается / Открыто)
+  - type: state-label
+    entity: cover.1_shlagbaum_derevnia_govorovo_15072_shlagbaum
+    style:
+      top: 93%
+      left: 50%
+      color: white
+      text-shadow: 0 0 4px black
+      font-size: 95%
+      transform: translate(-50%, -50%)

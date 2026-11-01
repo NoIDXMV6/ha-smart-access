@@ -1,0 +1,57 @@
+enroll:
+  name: Обучить (сохранить «своего»)
+  description: >-
+    Снимает кадр с камеры и отправляет его в базу «своих» аддона Smart Access Core.
+    Для машины — 8 аугментаций (сезоны/погода/свет), для лица — эмбеддинг SFace.
+    Используется кнопкой «Обучить» на видео-карточках.
+  fields:
+    entity_id:
+      name: Камера
+      description: Камера, с которой взять кадр (шлагбаум или калитка).
+      required: true
+      example: camera.1_shlagbaum_derevnia_govorovo_15072_kamera
+      selector:
+        entity:
+          domain: camera
+    subject:
+      name: Имя
+      description: Имя машины или человека в базе (например «Моя машина», «Жена»).
+      required: true
+      example: Моя машина
+      selector:
+        text:
+    kind:
+      name: Тип
+      description: auto — определить по привязке камеры (Настройки → Smart Access), car/face — явно.
+      default: auto
+      selector:
+        select:
+          options:
+            - label: Авто (по привязке камеры)
+              value: auto
+            - label: Машина
+              value: car
+            - label: Лицо
+              value: face
+identify:
+  name: Тест распознавания
+  description: >-
+    Снимает кадр и возвращает результат сопоставления с базой «своих».
+    Результат приходит событием smart_access_ack (смотрите в Инструменты разработчика → События).
+  fields:
+    entity_id:
+      name: Камера
+      required: true
+      selector:
+        entity:
+          domain: camera
+    kind:
+      name: Тип
+      default: car
+      selector:
+        select:
+          options:
+            - label: Машина
+              value: car
+            - label: Лицо
+              value: face

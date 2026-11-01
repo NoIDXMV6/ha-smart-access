@@ -1,0 +1,12 @@
+{
+  "entity": {
+    "sensor": {
+      "smart_access_status": {
+        "default": "mdi:shield-car"
+      },
+      "smart_access_last_event": {
+        "default": "mdi:car-door"
+      }
+    }
+  }
+}

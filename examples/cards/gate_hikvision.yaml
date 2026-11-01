@@ -1,0 +1,82 @@
+# Карточка калитки/входной двери (домофон Hikvision) с открытием по лицам.
+# Требуется: интеграция Hik-Connect (tomasbedrich) + локальная камера
+# (generic camera с rtsp://…/Streaming/Channels/101) + smart_access.
+#
+# ЗАМЕНИТЕ сущности на свои:
+#   camera.vhod        — локальная камера домофона (generic RTSP)
+#   lock.…_lock        — замок из интеграции Hik-Connect
+#   Обучение лиц: кнопка «Обучить» ниже вызывает smart_access.enroll
+#       (kind: face). Имена людей — в настройках интеграции Smart Access.
+type: picture-elements
+camera_view: live
+camera_image: camera.vhod
+title: Калитка — вход
+elements:
+  # Открыть калитку (замок Hik-Connect: unlock на 5 с)
+  - type: state-icon
+    entity: lock.vhod_lock
+    icon: mdi:door-open
+    style:
+      top: 84%
+      left: 86%
+      color: white
+      background: rgba(0,0,0,0.45)
+      border-radius: 50%
+      padding: 12px
+      transform: translate(-50%,-50%)
+    tap_action:
+      action: perform-action
+      perform_action: lock.unlock
+      target:
+        entity_id: lock.vhod_lock
+      confirmation:
+        text: Открыть калитку?
+
+  # Обучить лицо: сервис smart_access.train_photo (kind=face)
+  - type: state-icon
+    entity: binary_sensor.smart_access_vhod_face_match
+    icon: mdi:face-recognition
+    style:
+      top: 84%
+      left: 74%
+      color: white
+      background: rgba(0,0,0,0.45)
+      border-radius: 50%
+      padding: 12px
+      transform: translate(-50%,-50%)
+    tap_action:
+      action: perform-action
+      perform_action: smart_access.enroll
+      target:
+        entity_id: binary_sensor.smart_access_vhod_face_match
+      data:
+        kind: face
+        label: Жена
+      confirmation:
+        text: Сохранить кадр как лицо «Жена»?
+
+  - type: icon
+    icon: mdi:arrow-expand-all
+    style:
+      top: 84%
+      left: 14%
+      color: white
+      background: rgba(0,0,0,0.45)
+      border-radius: 50%
+      padding: 12px
+      transform: translate(-50%,-50%)
+    tap_action:
+      action: more-info
+      entity: camera.vhod
+
+  # Статус распознавания
+  - type: state-label
+    entity: binary_sensor.smart_access_vhod_face_match
+    style:
+      top: 93%
+      left: 50%
+      color: white
+      background: rgba(0,0,0,0.45)
+      padding: 4px 10px
+      border-radius: 8px
+      transform: translate(-50%,-50%)

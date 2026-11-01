@@ -162,6 +162,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.services.async_register(DOMAIN, SERVICE_ENROLL, svc_enroll, schema=ENROLL_SCHEMA)
         hass.services.async_register(DOMAIN, SERVICE_IDENTIFY, svc_identify, schema=IDENTIFY_SCHEMA)
 
+    # Бренд-иконка интеграции (без авторизации): entity_picture и карточки
+    try:
+        from .brand import BrandIconView
+
+        hass.http.register_view(BrandIconView())
+    except Exception as exc:  # noqa: BLE001
+        LOG.debug("Brand view не зарегистрирован: %s", exc)
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

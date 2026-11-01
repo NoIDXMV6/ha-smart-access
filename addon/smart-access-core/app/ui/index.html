@@ -98,9 +98,9 @@ async function refresh() {
     $('masterBtn').textContent = st.master_enable ? 'Авто-допуск: ВКЛ' : 'Авто-допуск: ВЫКЛ';
     $('masterBtn').className = st.master_enable ? 'master-on' : 'master-off';
     const rows = Object.entries(st.bridge||{}).map(([n,c]) =>
-      `<tr><td>${n}</td><td>${c.entity}</td><td><span class="pill ${c.failures>5?'err':'ok'}">сбоев: ${c.failures}</span></td><td>${c.url}</td></tr>`).join('');
+      `<tr><td>${n}</td><td>${c.entity}</td><td><span class="pill ${c.failures>5?'err':'ok'}">сбоев: ${c.failures}</span></td><td>${c.direct?'<b>прямой RTSP</b> (без моста) — Frigate берёт поток напрямую':c.url}</td></tr>`).join('');
     $('status').innerHTML =
-      `<table><tr><th>Камера/мост</th><th>HA-сущность</th><th>Состояние</th><th>MJPEG для Frigate</th></tr>${rows}</table>
+      `<table><tr><th>Камера</th><th>HA-сущность</th><th>Состояние</th><th>Источник для Frigate</th></tr>${rows}</table>
        <p>Модели: ${Object.entries(st.models).map(([k,v])=>`<span class="pill ${v==='ok'?'ok':'err'}">${k}: ${v}</span>`).join(' ')}
        &nbsp; Frigate: ${st.frigate?'<span class="pill ok">связь есть</span>':'<span class="pill err">нет связи</span>'}
        &nbsp; MQTT: ${st.mqtt_host}

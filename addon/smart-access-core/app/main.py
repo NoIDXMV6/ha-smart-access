@@ -41,6 +41,72 @@ UI_DIR = Path(__file__).parent / "ui"
 MODEL_NAMES = ["clip_vision_q.onnx", "sface.onnx", "yunet.onnx"]
 
 
+def build_frigate_config(conf, bridge) -> str:
+    """Генерирует config.yml для Frigate из настроек аддона.
+
+    Камеры с rtsp_url идут напрямую (TCP-транспорт — надёжнее для Hikvision),
+    остальные — через MJPEG-мост аддона.
+    """
+    cams = [c for c in conf.cameras if c.get("mode", "off") != "off"]
+    mqtt_host = conf.mqtt.get("host") or "core-mosquitto"
+    lines: list[str] = []
+    lines.append("mqtt:")
+    lines.append(f"  host: {mqtt_host}")
+    lines.append(f"  port: {int(conf.mqtt.get('port') or 1883)}")
+    if conf.mqtt.get("user"):
+        lines.append(f"  user: {conf.mqtt['user']}")
+        lines.append("  password: ВАШ_ПАРОЛЬ_БРОКЕРА")
+    lines.append("")
+    lines.append("detectors:")
+    lines.append("  cpu:")
+    lines.append("    type: openvino")
+    lines.append("    device: CPU")
+    lines.append("    model:")
+    lines.append("      path: /openvino-model/ssdlite_mobilenet_v2.xml")
+    lines.append("model:")
+    lines.append("  width: 300")
+    lines.append("  height: 300")
+    lines.append("  input_tensor: nhwc")
+    lines.append("  input_pixel_format: bgr")
+    lines.append("  labelmap_path: /openvino-model/coco_91cl_bkgr.txt")
+    lines.append("")
+    lines.append("cameras:")
+    for c in cams:
+        name = c["name"]
+        rtsp = (c.get("rtsp_url") or "").strip()
+        lines.append(f"  {name}:")
+        lines.append("    ffmpeg:")
+        lines.append("      inputs:")
+        if rtsp:
+            # локальный RTSP — лучший путь: полный fps и разрешение без моста
+            lines.append(f"        - path: {rtsp}")
+            lines.append("          input_args: preset-rtsp-tcp")
+        else:
+            lines.append(f"        - path: {bridge.url(name)}")
+            lines.append("          input_args: -f mjpeg")
+        lines.append("          roles:")
+        lines.append("            - detect")
+        lines.append("    detect:")
+        lines.append("      enabled: true")
+        lines.append("      fps: 5")
+        lines.append("      width: 1280")
+        lines.append("      height: 720")
+        lines.append("    objects:")
+        lines.append("      track:")
+        if "car" in c.get("mode", ""):
+            lines.append("        - car")
+        if "face" in c.get("mode", ""):
+            lines.append("        - person")
+        lines.append("    snapshots:")
+        lines.append("      enabled: true")
+        lines.append("      retain:")
+        lines.append("        default: 2")
+        lines.append("    record:")
+        lines.append("      enabled: false")
+        lines.append("")
+    return "\n".join(lines)
+
+
 async def main() -> None:
     cfg.CONF  # initial load
     store = Store()
@@ -51,9 +117,11 @@ async def main() -> None:
 
     # --------- начальная настройка камер ---------
     def apply_cameras() -> None:
+        # камеры с rtsp_url идут во Frigate напрямую — мост для них не нужен
         cams = [
             {"name": c["name"], "ha_entity": c.get("ha_entity", "")}
             for c in cfg.CONF.cameras
+            if not (c.get("rtsp_url") or "").strip()
         ]
         bridge.set_cameras(cams)
 
@@ -87,7 +155,8 @@ async def main() -> None:
             "bridge": {
                 c["name"]: {
                     "entity": c.get("ha_entity"),
-                    "url": bridge.url(c["name"]),
+                    "direct": bool((c.get("rtsp_url") or "").strip()),
+                    "url": (c.get("rtsp_url") or "").strip() or bridge.url(c["name"]),
                     "failures": bridge.failures.get(c["name"], 0),
                     "clients": bridge.clients.get(c["name"], 0),
                 }
@@ -152,65 +221,11 @@ async def main() -> None:
         return web.json_response({"events": store.events[:80]})
 
     async def handle_frigate_config(_req: web.Request) -> web.Response:
-        conf = cfg.CONF
-        cams = []
-        for c in conf.cameras:
-            if c.get("mode", "off") == "off":
-                continue
-            cams.append(c)
-        rec = conf.recognition
-        mqtt_host = conf.mqtt.get("host") or "core-mosquitto"
-        lines: list[str] = []
-        lines.append("mqtt:")
-        lines.append(f"  host: {mqtt_host}")
-        lines.append(f"  port: {int(conf.mqtt.get('port') or 1883)}")
-        if conf.mqtt.get("user"):
-            lines.append(f"  user: {conf.mqtt['user']}")
-            lines.append("  password: ВАШ_ПАРОЛЬ_БРОКЕРА")
-        lines.append("")
-        lines.append("detectors:")
-        lines.append("  cpu:")
-        lines.append("    type: openvino")
-        lines.append("    device: CPU")
-        lines.append("    model:")
-        lines.append("      path: /openvino-model/ssdlite_mobilenet_v2.xml")
-        lines.append("model:")
-        lines.append("  width: 300")
-        lines.append("  height: 300")
-        lines.append("  input_tensor: nhwc")
-        lines.append("  input_pixel_format: bgr")
-        lines.append("  labelmap_path: /openvino-model/coco_91cl_bkgr.txt")
-        lines.append("")
-        lines.append("cameras:")
-        for c in cams:
-            name = c["name"]
-            lines.append(f"  {name}:")
-            lines.append("    ffmpeg:")
-            lines.append("      inputs:")
-            lines.append(f"        - path: {bridge.url(name)}")
-            lines.append("          input_args: -f mjpeg")
-            lines.append("          roles:")
-            lines.append("            - detect")
-            lines.append("    detect:")
-            lines.append("      enabled: true")
-            lines.append("      fps: 5")
-            lines.append("      width: 1280")
-            lines.append("      height: 720")
-            lines.append("    objects:")
-            lines.append("      track:")
-            if "car" in c.get("mode", ""):
-                lines.append("        - car")
-            if "face" in c.get("mode", ""):
-                lines.append("        - person")
-            lines.append("    snapshots:")
-            lines.append("      enabled: true")
-            lines.append("      retain:")
-            lines.append("        default: 2")
-            lines.append("    record:")
-            lines.append("      enabled: false")
-            lines.append("")
-        text = "\n".join(lines)
-        return web.Response(text=text, content_type="text/plain", charset="utf-8")
+        return web.Response(
+            text=build_frigate_config(cfg.CONF, bridge),
+            content_type="text/plain",
+            charset="utf-8",
+        )
 
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/status", handle_status)

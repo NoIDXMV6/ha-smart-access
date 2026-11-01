@@ -1,82 +1,93 @@
-# Карточка калитки/входной двери (домофон Hikvision) с открытием по лицам.
-# Требуется: интеграция Hik-Connect (tomasbedrich) + локальная камера
-# (generic camera с rtsp://…/Streaming/Channels/101) + smart_access.
+# Карточка калитки (домофония Hikvision): живое видео + кнопки «Открыть» / «Обучить».
+# Версия 1.1.0 — реальные сущности: relay-выключатель Hik-Connect и локальная
+# RTSP-камера (generic camera). Без неопределённых сущностей.
 #
-# ЗАМЕНИТЕ сущности на свои:
-#   camera.vhod        — локальная камера домофона (generic RTSP)
-#   lock.…_lock        — замок из интеграции Hik-Connect
-#   Обучение лиц: кнопка «Обучить» ниже вызывает smart_access.enroll
-#       (kind: face). Имена людей — в настройках интеграции Smart Access.
+# КАК ПОДКЛЮЧИТЬ КАМЕРУ (один раз):
+#   Настройки → Устройства и сервисы → Добавить интеграцию → «Универсальная камера»
+#     Поток:           rtsp://admin:ПАРОЛЬ@192.168.168.77:554/h264/ch01/main/av_stream
+#     RTSP transport:  tcp
+#     Имя:             Калитка        → получится сущность camera.kalitka
+#   (если в пароле есть спецсимволы @ : / ? # — замените их в URL:
+#    @→%40, :→%3A, /→%2F, ?→%3F, #→%23; «!» менять не нужно)
+#
+# ЗАМЕНИТЕ на свои сущности, если отличаются:
+#   camera.kalitka              — универсальная камера с RTSP-потоком калитки
+#   switch.door_door_relay_0    — реле открытия двери/калитки из Hik-Connect
+#                                 (включается на мгновение, реле возвращается само)
+#   Имя для «Обучить»:          — смените «Я» на имя члена семьи
+#                                 (фото остальных добавляются в панели Smart Access → Лица)
+#
+# Требуется: интеграция Hik-Connect (switch.door_door_relay_0), аддон
+# smart-access-core + интеграция Smart Access (HACS), Mosquitto broker.
+
 type: picture-elements
 camera_view: live
-camera_image: camera.vhod
+camera_image: camera.kalitka
 title: Калитка — вход
 elements:
-  # Открыть калитку (замок Hik-Connect: unlock на 5 с)
+  # Кнопка «Открыть калитку» (поверх видео, справа внизу)
   - type: state-icon
-    entity: lock.vhod_lock
+    entity: switch.door_door_relay_0
     icon: mdi:door-open
     style:
       top: 84%
       left: 86%
       color: white
-      background: rgba(0,0,0,0.45)
+      background: rgba(0, 0, 0, 0.45)
       border-radius: 50%
       padding: 12px
-      transform: translate(-50%,-50%)
+      transform: translate(-50%, -50%)
     tap_action:
       action: perform-action
-      perform_action: lock.unlock
+      perform_action: switch.turn_on
       target:
-        entity_id: lock.vhod_lock
+        entity_id: switch.door_door_relay_0
       confirmation:
         text: Открыть калитку?
 
-  # Обучить лицо: сервис smart_access.train_photo (kind=face)
-  - type: state-icon
-    entity: binary_sensor.smart_access_vhod_face_match
+  # Кнопка «Обучить» — кадр с камеры в базу лиц (слева от кнопки открытия)
+  - type: icon
     icon: mdi:face-recognition
     style:
       top: 84%
-      left: 74%
+      left: 70%
       color: white
-      background: rgba(0,0,0,0.45)
+      background: rgba(0, 0, 0, 0.45)
       border-radius: 50%
-      padding: 12px
-      transform: translate(-50%,-50%)
+      padding: 10px
+      transform: translate(-50%, -50%)
     tap_action:
       action: perform-action
       perform_action: smart_access.enroll
-      target:
-        entity_id: binary_sensor.smart_access_vhod_face_match
       data:
+        entity_id: camera.kalitka
+        subject: Я
         kind: face
-        label: Жена
       confirmation:
-        text: Сохранить кадр как лицо «Жена»?
+        text: Добавить текущий кадр как лицо «Я»?
 
+  # Кнопка «во весь экран» — диалог с живым видео (слева внизу)
   - type: icon
     icon: mdi:arrow-expand-all
     style:
       top: 84%
       left: 14%
       color: white
-      background: rgba(0,0,0,0.45)
+      background: rgba(0, 0, 0, 0.45)
       border-radius: 50%
-      padding: 12px
-      transform: translate(-50%,-50%)
+      padding: 10px
+      transform: translate(-50%, -50%)
     tap_action:
       action: more-info
-      entity: camera.vhod
+      entity: camera.kalitka
 
-  # Статус распознавания
+  # Подпись: последнее событие Smart Access (допуск/отказ/обучение)
   - type: state-label
-    entity: binary_sensor.smart_access_vhod_face_match
+    entity: sensor.smart_access_last_event
     style:
       top: 93%
       left: 50%
       color: white
-      background: rgba(0,0,0,0.45)
-      padding: 4px 10px
-      border-radius: 8px
-      transform: translate(-50%,-50%)
+      text-shadow: 0 0 4px black
+      font-size: 95%
+      transform: translate(-50%, -50%)

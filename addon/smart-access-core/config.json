@@ -1,6 +1,6 @@
 {
   "name": "Smart Access Core",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "slug": "smart-access-core",
   "description": "Умный допуск на одной VM с HAOS: авто-открытие шлагбаумов по своим машинам и калитки по лицам. LLM — только внешний URL+token+модель (опционально).",
   "url": "https://github.com/NoIDXMV6/ha-smart-access",
@@ -41,6 +41,7 @@
         "name": "govorovo",
         "ha_entity": "camera.1_shlagbaum_derevnia_govorovo_15072_kamera",
         "mode": "car",
+        "rtsp_url": "",
         "executor_service": "amvideo.open_barrier",
         "executor_target": "",
         "cooldown": 45,
@@ -78,6 +79,7 @@
         "name": "str",
         "ha_entity": "str",
         "mode": "list(car|face|car+face|off)",
+        "rtsp_url": "str?",
         "executor_service": "str?",
         "executor_target": "str?",
         "cooldown": "int(5,600)?",

@@ -27,6 +27,8 @@
 
 * Раздаёт камеры HA (включая облачные А.М.Видео/ЕГДС) локальным MJPEG-потоком
   для Frigate: `http://127.0.0.1:8100/mjpeg/<name>`.
+* Камеры с заполненным полем `rtsp_url` идут во Frigate напрямую (TCP-транспорт
+  подставляется генератором), мост для них не тратит ресурсы.
 * Слушает события Frigate (MQTT), распознаёт машины (CLIP, CPU) и лица (SFace).
 * Открывает исполнителей через HA: `executor_service` + `executor_target`
   (например `amvideo.open_barrier` + `button.1_shlagbaum_..._otkryt`,

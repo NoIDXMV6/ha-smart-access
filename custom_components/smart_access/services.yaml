@@ -55,3 +55,27 @@ identify:
               value: car
             - label: Лицо
               value: face
+retrain:
+  name: Переобучить базу
+  description: >-
+    Пересобирает прототипы распознавания по фактическим фотографиям
+    (/media/smart_access/...). Выполняйте после удаления ошибочных фото
+    или обновления моделей. Долгая операция — результат приходит событием
+    smart_access_event (action: retrained) и виден в журнале панели.
+  fields:
+    kind:
+      name: Тип базы
+      required: true
+      selector:
+        select:
+          options:
+            - label: Машины
+              value: car
+            - label: Лица
+              value: face
+    subject:
+      name: Имя (необязательно)
+      description: Переобучить только одного. Без поля — вся база выбранного типа.
+      required: false
+      selector:
+        text:

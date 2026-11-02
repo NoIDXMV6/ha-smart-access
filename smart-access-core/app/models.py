@@ -1,4 +1,5 @@
-"""Распознавание: CLIP ViT-B/32 (int8, CPU) для машин, YuNet+SFace для лиц.
+"""Распознавание: CLIP ViT-B/32 (int8, CPU) для машин, YuNet+SFace для лиц,
+YOLOv8n-pose (int8, CPU) для жестов.
 
 Принцип устойчивости (все модели локальные, CPU, работают без интернета):
   * Машина  -> кроп авто -> аугментации -> CLIP-эмбеддинг 512-d -> max cosine
@@ -41,7 +42,8 @@ class Models:
         self._clip: ort.InferenceSession | None = None
         self._det: cv2.FaceDetectorYN | None = None
         self._rec: cv2.FaceRecognizerSF | None = None
-        self.status: dict[str, str] = {"clip": "loading", "face": "loading"}
+        self._pose: ort.InferenceSession | None = None
+        self.status: dict[str, str] = {"clip": "loading", "face": "loading", "pose": "loading"}
         self.load()
 
     # ---------- загрузка ----------
@@ -75,6 +77,17 @@ class Models:
                 self._rec = None
                 self.status["face"] = f"error: {exc}"
                 LOG.error("Модели лиц не загрузились: %s", exc)
+            try:
+                ppath = os.environ.get("SMART_ACCESS_POSE_MODEL") or os.path.join(mdir, "yolov8n-pose.onnx")
+                self._pose = ort.InferenceSession(
+                    ppath, sess_options=opts, providers=["CPUExecutionProvider"]
+                )
+                self.status["pose"] = "ok"
+            except Exception as exc:  # noqa: BLE001
+                self._pose = None
+                # не ошибка запуска: жесты — опциональная функция
+                self.status["pose"] = "off (модель не найдена)"
+                LOG.warning("Модель поз не загрузилась (%s) — функционал жестов отключён", exc)
             LOG.info("Модели: %s", self.status)
 
     @property
@@ -84,6 +97,10 @@ class Models:
     @property
     def faces_ok(self) -> bool:
         return self.status.get("face") == "ok"
+
+    @property
+    def gestures_ok(self) -> bool:
+        return self._pose is not None
 
     # ---------- аугментации («пре-трейн» базы под погоду/время суток) ----------
 
@@ -199,3 +216,107 @@ class Models:
         if faces is None:
             return None, w, h
         return self._rec.alignCrop(img, faces[0]), w, h
+
+    # ---------- жесты (YOLOv8n-pose, 17 ключевых точек COCO) ----------
+
+    # Индексы точек COCO: 0 nose, 5 L-shoulder, 6 R-shoulder,
+    #                     7 L-elbow, 8 R-elbow, 9 L-wrist, 10 R-wrist
+    KP_L_SHOULDER, KP_R_SHOULDER = 5, 6
+    KP_L_WRIST, KP_R_WRIST = 9, 10
+
+    def detect_poses(self, jpg: bytes, conf_th: float = 0.35,
+                     max_persons: int = 5) -> list[dict[str, Any]]:
+        """Детекция людей и их 17 точек на полном кадре.
+
+        Возвращает [{'conf': float, 'kpt': np.ndarray(17, 3)}] — точки
+        в координатах ИСХОДНОГО кадра (x, y, score), y растёт вниз.
+        """
+        if self._pose is None:
+            return []
+        img = _jpeg_decode(jpg)
+        if img is None:
+            return []
+        h0, w0 = img.shape[:2]
+        size = 640
+        r = min(size / h0, size / w0)
+        nh, nw = max(1, int(h0 * r)), max(1, int(w0 * r))
+        resized = cv2.resize(img, (nw, nh))
+        canvas = np.full((size, size, 3), 114, np.uint8)
+        dy, dx = (size - nh) // 2, (size - nw) // 2
+        canvas[dy:dy + nh, dx:dx + nw] = resized
+        x = canvas[:, :, ::-1].transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+        out = self._pose.run(None, {"images": x})[0][0]  # (56, 8400)
+        conf = out[4]
+        cand = np.where(conf > conf_th)[0]
+        if cand.size == 0:
+            return []
+        boxes = out[:4, cand].T  # (N, 4) cx,cy,w,h в сетке 640
+        scores = conf[cand]
+        keep = self._nms(boxes, scores, iou_th=0.55)
+        persons: list[dict[str, Any]] = []
+        for i in keep[:max_persons]:
+            idx = int(cand[i])
+            kpt = out[5:, idx].reshape(17, 3).astype(np.float32)
+            kpt[:, 0] = (kpt[:, 0] - dx) / r
+            kpt[:, 1] = (kpt[:, 1] - dy) / r
+            persons.append({"conf": float(conf[idx]), "kpt": kpt})
+        return persons
+
+    @staticmethod
+    def _nms(boxes: np.ndarray, scores: np.ndarray, iou_th: float = 0.55) -> list[int]:
+        x1 = boxes[:, 0] - boxes[:, 2] / 2
+        y1 = boxes[:, 1] - boxes[:, 3] / 2
+        x2 = boxes[:, 0] + boxes[:, 2] / 2
+        y2 = boxes[:, 1] + boxes[:, 3] / 2
+        order = scores.argsort()[::-1]
+        keep: list[int] = []
+        while order.size:
+            i = int(order[0])
+            keep.append(i)
+            xx1 = np.maximum(x1[i], x1[order[1:]])
+            yy1 = np.maximum(y1[i], y1[order[1:]])
+            xx2 = np.minimum(x2[i], x2[order[1:]])
+            yy2 = np.minimum(y2[i], y2[order[1:]])
+            inter = np.clip(xx2 - xx1, 0, None) * np.clip(yy2 - yy1, 0, None)
+            area_i = (x2[i] - x1[i]) * (y2[i] - y1[i])
+            area_o = (x2[order[1:]] - x1[order[1:]]) * (y2[order[1:]] - y1[order[1:]])
+            iou = inter / (area_i + area_o - inter + 1e-9)
+            order = order[1:][iou <= iou_th]
+        return keep
+
+    @classmethod
+    def classify_gesture(cls, persons: list[dict[str, Any]], kpt_conf: float = 0.25) -> dict[str, Any]:
+        """Правила жестов по ключевым точкам.
+
+        * 'alarm'   — ОБЕ руки подняты выше плеч (классический SOS-жест);
+        * 'confirm' — хотя бы ОДНА рука поднята выше плеча.
+        Точка считается валидной при score >= kpt_conf.
+        """
+        res: dict[str, Any] = {"alarm": False, "confirm": False,
+                               "persons": len(persons), "available": True}
+
+        def arm_up(kpt: np.ndarray, wrist_i: int, shoulder_i: int) -> bool:
+            if kpt.shape[0] <= shoulder_i:
+                return False
+            wr, sh = kpt[wrist_i], kpt[shoulder_i]
+            if wr[2] < kpt_conf or sh[2] < kpt_conf:
+                return False
+            return float(wr[1]) < float(sh[1])  # y растёт вниз: рука ВЫШЕ плеча
+
+        for p in persons:
+            kpt = p.get("kpt")
+            if kpt is None:
+                continue
+            left_up = arm_up(kpt, cls.KP_L_WRIST, cls.KP_L_SHOULDER)
+            right_up = arm_up(kpt, cls.KP_R_WRIST, cls.KP_R_SHOULDER)
+            if left_up and right_up:
+                res["alarm"] = True
+            elif left_up or right_up:
+                res["confirm"] = True
+        return res
+
+    def detect_gesture(self, jpg: bytes) -> dict[str, Any]:
+        """Полный путь: кадр -> позы -> жест. Работает только при gestures_ok."""
+        if self._pose is None:
+            return {"alarm": False, "confirm": False, "persons": 0, "available": False}
+        return self.classify_gesture(self.detect_poses(jpg))

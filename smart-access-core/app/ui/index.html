@@ -5,33 +5,62 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Smart Access — управление допуском</title>
 <style>
-  :root { --ok:#2e7d32; --warn:#ef6c00; --err:#c62828; --bg:#f5f6f8; --card:#fff; --line:#e3e6ea; }
+  :root { --ok:#2e7d32; --warn:#ef6c00; --err:#c62828; --bg:#f5f6f8; --card:#fff; --line:#e3e6ea; --acc:#0f2b46; }
   * { box-sizing:border-box; font-family:system-ui,'Segoe UI',Roboto,sans-serif; }
   body { margin:0; background:var(--bg); color:#1c2128; }
-  header { background:#0f2b46; color:#fff; padding:14px 22px; display:flex; align-items:center; gap:14px; }
+  header { background:var(--acc); color:#fff; padding:12px 22px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
   header h1 { font-size:18px; margin:0; font-weight:600; }
   .state { font-size:12px; padding:3px 10px; border-radius:12px; background:#37474f; }
   .state.ok { background:var(--ok); } .state.degraded { background:var(--warn); }
-  main { max-width:1080px; margin:18px auto; padding:0 14px; display:grid; gap:16px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; }
+  nav { background:#0b1f33; display:flex; flex-wrap:wrap; padding:0 12px; }
+  nav button { background:none; color:#b8c4d0; border:0; border-bottom:3px solid transparent; border-radius:0;
+               padding:10px 14px; font-size:13.5px; cursor:pointer; }
+  nav button.active { color:#fff; border-bottom-color:#4fa3ff; }
+  main { max-width:1100px; margin:16px auto 60px; padding:0 14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:16px; }
   .card h2 { margin:0 0 10px; font-size:15px; }
   .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:760px){ .grid2 { grid-template-columns:1fr; } }
   table { width:100%; border-collapse:collapse; font-size:13px; }
-  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
-  .pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; background:#eceff1; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; background:#eceff1; margin:1px; }
   .pill.ok { background:#e8f5e9; color:var(--ok); } .pill.err { background:#ffebee; color:var(--err); }
-  button { border:0; border-radius:8px; padding:8px 14px; cursor:pointer; font-size:13px; background:#0f2b46; color:#fff; }
+  .pill.warn { background:#fff3e0; color:var(--warn); }
+  .pill.alarm { background:#c62828; color:#fff; font-weight:600; }
+  button { border:0; border-radius:8px; padding:8px 14px; cursor:pointer; font-size:13px; background:var(--acc); color:#fff; }
+  button.small { padding:5px 10px; font-size:12px; }
   button.danger { background:var(--err); }
-  button.master-on { background:var(--ok); } button.master-off { background:var(--warn); }
-  textarea { width:100%; height:230px; font-family:ui-monospace,Consolas,monospace; font-size:12px;
-             border:1px solid var(--line); border-radius:8px; padding:8px; }
+  button.green { background:var(--ok); }
+  button.orange { background:var(--warn); }
+  button.ghost { background:#eceff1; color:#1c2128; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
   .muted { color:#66707a; font-size:12px; }
-  .ev { font-size:12px; padding:4px 0; border-bottom:1px dashed var(--line); display:flex; gap:8px; }
-  .ev b { min-width:120px; }
-  input[type=text], input[type=file] { font-size:13px; padding:7px; border:1px solid var(--line); border-radius:8px; }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .subj { display:flex; align-items:center; gap:12px; border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:8px; flex-wrap:wrap; }
+  .subj img.thumb { width:64px; height:64px; object-fit:cover; border-radius:8px; background:#eee; }
+  .subj .name { font-weight:600; font-size:14px; }
+  .subj .meta { font-size:11.5px; color:#66707a; }
+  textarea, input[type=text], input[type=number], input[type=datetime-local], input[type=file], select {
+    font-size:13px; padding:7px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  textarea { width:100%; height:230px; font-family:ui-monospace,Consolas,monospace; font-size:12px; }
   .frigate-warn { color:var(--err); background:#fff8e1; border:1px solid #f0d8a8;
                   border-radius:8px; padding:8px 12px; font-size:12.5px; line-height:1.45; }
+  /* модальная галерея */
+  .modal { display:none; position:fixed; inset:0; background:rgba(10,20,30,.55); z-index:50; overflow:auto; }
+  .modal .box { background:#fff; max-width:960px; margin:30px auto; border-radius:12px; padding:18px; }
+  .modal h3 { margin:0 0 12px; font-size:16px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .ph-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; }
+  .ph { position:relative; border-radius:8px; overflow:hidden; border:3px solid transparent; cursor:pointer; background:#f0f0f0; }
+  .ph img { width:100%; height:110px; object-fit:cover; display:block; }
+  .ph.sel { border-color:var(--err); }
+  .ph .fname { font-size:9.5px; color:#555; padding:2px 4px; word-break:break-all; }
+  .switch { display:flex; align-items:center; gap:10px; padding:8px 0; }
+  .switch label { font-size:13.5px; }
+  .ev { font-size:12px; padding:4px 0; border-bottom:1px dashed var(--line); display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; }
+  .ev b { min-width:120px; white-space:nowrap; }
+  .tabpane { display:none; } .tabpane.active { display:block; }
+  .num { font-variant-numeric: tabular-nums; }
+  .hint { font-size:12px; color:#66707a; line-height:1.5; margin:6px 0; }
 </style>
 </head>
 <body>
@@ -41,120 +70,185 @@
   <span style="flex:1"></span>
   <button id="masterBtn" onclick="toggleMaster()">…</button>
 </header>
+<nav id="tabs">
+  <button data-t="status" class="active">Статус</button>
+  <button data-t="cars">Машины</button>
+  <button data-t="faces">Лица</button>
+  <button data-t="gestures">Жесты и тревога</button>
+  <button data-t="journal">Журнал</button>
+  <button data-t="frigate">Конфиг Frigate</button>
+</nav>
 <main>
-  <div class="card">
-    <h2>Состояние</h2>
-    <div id="status" class="muted">загрузка…</div>
-  </div>
-
-  <div class="grid2">
+  <!-- ============ СТАТУС ============ -->
+  <div class="tabpane active" id="pane-status">
     <div class="card">
-      <h2>Машины («свои» на шлагбаум)</h2>
-      <table id="cars"><tr><th>Имя</th><th>Фото</th><th></th></tr></table>
-      <div class="row" style="margin-top:10px">
-        <input type="text" id="carName" placeholder="Например: Моя машина">
-        <input type="file" id="carPhoto" accept="image/*">
-        <button onclick="enroll('car')">Обучить</button>
-      </div>
-      <p class="muted">Сфотографируйте машину с камеры шлагбаума (или загрузите файл).
-      Система сама сделает 8 вариантов (ночь/дождь/снег/контражур) — это «пре-трейн» базы.</p>
-    </div>
-
-    <div class="card">
-      <h2>Лица (калитка/дверь)</h2>
-      <table id="faces"><tr><th>Имя</th><th>Фото</th><th></th></tr></table>
-      <div class="row" style="margin-top:10px">
-        <input type="text" id="faceName" placeholder="Например: Жена">
-        <input type="file" id="facePhoto" accept="image/*">
-        <button onclick="enroll('face')">Обучить</button>
-      </div>
-      <p class="muted">Крупное фото лица (анфас). Добавляйте 2–3 фото с разных ракурсов.</p>
+      <h2>Состояние</h2>
+      <div id="status" class="muted">загрузка…</div>
     </div>
   </div>
 
-  <div class="card">
-    <h2>Журнал</h2>
-    <div id="events" class="muted">загрузка…</div>
+  <!-- ============ МАШИНЫ / ЛИЦА ============ -->
+  <div class="tabpane" id="pane-cars"></div>
+  <div class="tabpane" id="pane-faces"></div>
+
+  <!-- ============ ЖЕСТЫ И ТРЕВОГА ============ -->
+  <div class="tabpane" id="pane-gestures">
+    <div class="card">
+      <h2>Жесты</h2>
+      <div class="switch">
+        <input type="checkbox" id="gestEnabled" onchange="saveSetting('gestures_enabled', this.checked)">
+        <label for="gestEnabled"><b>Подтверждение открытия жестом</b></label>
+      </div>
+      <p class="hint">
+        Когда человек подходит к калитке и лицо распознано как «своё», открытие происходит
+        только после <b>жеста-подтверждения — одна рука поднята вверх</b>.
+        Если обе руки подняты вверх — это <b>жест-тревога</b>: калитка откроется и одновременно
+        будет отправлен инцидент (звонок на тревожные номера + уведомление в Home Assistant).
+        Жесты выключаются этим переключателем (не нужно менять настройки аддона).
+      </p>
+      <div id="gestStatus" class="muted">…</div>
+    </div>
+    <div class="card">
+      <h2>Тревожные номера (SIP-звонок через ha-sip)</h2>
+      <div class="switch">
+        <input type="checkbox" id="alarmEnabled" onchange="saveSetting('alarm_enabled', this.checked)">
+        <label for="alarmEnabled"><b>Звонить при тревожном жесте</b></label>
+      </div>
+      <div id="alarmInfo" class="muted">…</div>
+      <div class="row" style="margin-top:10px">
+        <button class="danger" onclick="alarmTest()">Тест звонка</button>
+        <span class="muted">Позвонит на все номера с сообщением «Тест тревоги». Для изменения номеров
+        и текста: <b>Настройки → Дополнения → Smart Access Core → Конфигурация → alarm</b> (numbers — по одному номеру в строке).</span>
+      </div>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>Конфиг Frigate (генератор)</h2>
-    <p class="muted">Скопируйте в конфиг Frigate: веб-интерфейс Frigate → редактор конфигурации
-    (или файл /addon_configs/ccab4aaf_frigate/config.yml). Страница «Конфигурация» аддона для этого не используется.
-    Креды MQTT подставлены автоматически (Supervisor): если Frigate пишет
-    <b>MQTT Not authorized</b> — замените блок mqtt в его конфиге этим блоком целиком.</p>
-    <textarea id="frigateCfg" readonly></textarea>
-    <div class="row" style="margin-top:8px">
-      <button onclick="loadFrigate()">Сгенерировать</button>
-      <span class="muted">Детектор: OpenVINO на CPU — GPU не требуется.</span>
+  <!-- ============ ЖУРНАЛ ============ -->
+  <div class="tabpane" id="pane-journal">
+    <div class="card">
+      <h2>Фильтр журнала</h2>
+      <div class="row">
+        <select id="fKind"><option value="">все типы</option><option value="car">машины</option><option value="face">лица</option></select>
+        <select id="fAction">
+          <option value="">все события</option>
+          <option value="opened">открыто</option>
+          <option value="detected">обнаружено (без исполнителя)</option>
+          <option value="alarm">тревога</option>
+          <option value="gesture_wait">ожидание жеста</option>
+          <option value="unknown">неизвестный</option>
+          <option value="denied">отказ</option>
+          <option value="enrolled">обучение</option>
+          <option value="retrained">переобучение</option>
+        </select>
+        <select id="fCamera"><option value="">все камеры</option></select>
+        <input type="text" id="fSubject" placeholder="имя (subject)" style="width:130px">
+        <input type="number" id="fScoreMin" placeholder="score ≥" step="0.01" min="0" max="1" style="width:90px">
+        <input type="number" id="fScoreMax" placeholder="score ≤" step="0.01" min="0" max="1" style="width:90px">
+        <input type="datetime-local" id="fFrom" title="дата с">
+        <input type="datetime-local" id="fTo" title="дата по">
+        <button onclick="loadJournal()">Применить</button>
+        <button class="ghost" onclick="resetFilters()">Сброс</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>События</h2>
+      <div id="events" class="muted">загрузка…</div>
+    </div>
+    <div class="card">
+      <h2>Архив журнала</h2>
+      <div class="row" style="margin-bottom:10px">
+        <button onclick="archiveEvents()">Архивировать текущий журнал</button>
+        <button class="danger" onclick="clearEvents()">Очистить журнал (без архива)</button>
+        <span class="muted">Архив сохраняется в /media/smart_access/archive/ (виден в Медиа HA) — журнал после этого пуст.</span>
+      </div>
+      <div id="archives" class="muted">…</div>
+    </div>
+  </div>
+
+  <!-- ============ КОНФИГ FRIGATE ============ -->
+  <div class="tabpane" id="pane-frigate">
+    <div class="card">
+      <h2>Конфиг Frigate (генератор)</h2>
+      <p class="hint">Скопируйте в конфиг Frigate: веб-интерфейс Frigate → редактор конфигурации
+      (или файл /addon_configs/ccab4aaf_frigate/config.yml). Страница «Конфигурация» аддона для этого не используется.
+      Креды MQTT подставлены автоматически (Supervisor): если Frigate пишет
+      <b>MQTT Not authorized</b> — замените блок mqtt в его конфиге этим блоком целиком.</p>
+      <textarea id="frigateCfg" readonly></textarea>
+      <div class="row" style="margin-top:8px">
+        <button onclick="loadFrigate()">Сгенерировать</button>
+        <span class="muted">Детектор: OpenVINO на CPU — GPU не требуется.</span>
+      </div>
     </div>
   </div>
 </main>
+
+<!-- ============ МОДАЛ: ГАЛЕРЕЯ ФОТО ============ -->
+<div class="modal" id="galleryModal" onclick="if(event.target===this)closeGallery()">
+  <div class="box">
+    <h3 id="galleryTitle">Фото</h3>
+    <div class="row" style="margin-bottom:12px">
+      <label class="button small" style="background:var(--acc);color:#fff;padding:7px 12px;border-radius:8px;cursor:pointer">
+        + Добавить фото<input type="file" id="addPhotoInput" accept="image/*" multiple style="display:none" onchange="addPhotos(this)"></label>
+      <button class="danger small" id="delSelBtn" onclick="deleteSelected()" disabled>Удалить выбранные</button>
+      <button class="small" onclick="retrainCurrent()">Переобучить по фото</button>
+      <span class="muted">Клик по фото — отметить для удаления.</span>
+    </div>
+    <div id="galleryGrid" class="ph-grid"></div>
+  </div>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-// База API относительно ТЕКУЩЕГО документа. Панель открывается через ingress
-// по адресу /api/hassio_ingress/<токен>/ — запросы с ведущим '/' (fetch('/api/...'))
-// уходили бы в КОРЕНЬ Home Assistant (та отвечает HTML), а не в аддон.
-// Относительный путь работает и под ingress, и при прямом открытии :8099.
+// База API относительно ТЕКУЩЕГО документа — работает и под ingress, и напрямую на :8099.
 const API = (p) => (location.pathname.endsWith('/') ? location.pathname : location.pathname + '/') + String(p).replace(/^\/+/, '');
+let CUR_STATUS = null;
 
+/* ---------- табы ---------- */
+document.getElementById('tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-t]'); if (!b) return;
+  document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('.tabpane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + b.dataset.t));
+  if (b.dataset.t === 'cars') renderSubjectsPane('car');
+  if (b.dataset.t === 'faces') renderSubjectsPane('face');
+  if (b.dataset.t === 'journal') loadJournal();
+  if (b.dataset.t === 'gestures') refreshSettings();
+});
+
+/* ---------- статус ---------- */
 async function refresh() {
   try {
     const st = await (await fetch(API('api/status'))).json();
+    CUR_STATUS = st;
     $('state').textContent = st.state === 'ok' ? 'работает' : 'деградация';
     $('state').className = 'state ' + st.state;
     $('masterBtn').textContent = st.master_enable ? 'Авто-допуск: ВКЛ' : 'Авто-допуск: ВЫКЛ';
-    $('masterBtn').className = st.master_enable ? 'master-on' : 'master-off';
+    $('masterBtn').className = st.master_enable ? 'green' : 'orange';
     const rows = Object.entries(st.bridge||{}).map(([n,c]) =>
-      `<tr><td><b>${n}</b>${c.display&&c.display!==n?` <span class="muted">(${esc(c.display)})</span>`:''}</td><td>${esc(c.entity)}</td><td><span class="pill ${c.failures>5?'err':'ok'}">сбоев: ${c.failures}</span>${c.direct?'':` <span class="pill ${c.fps>0?'ok':''}">fps: ${c.fps||0}</span>`}</td><td>${c.direct?'<b>прямой RTSP</b> (без моста) — Frigate берёт поток напрямую':esc(c.url)}</td></tr>`).join('');
+      `<tr><td><b>${n}</b>${c.display&&c.display!==n?` <span class="muted">(${esc(c.display)})</span>`:''}</td><td>${esc(c.entity)}</td><td><span class="pill ${c.failures>5?'err':'ok'}">сбоев: ${c.failures}</span>${c.direct?'':` <span class="pill ${c.fps>0?'ok':''}">fps: ${c.fps||0}</span>`}</td><td>${c.direct?'<b>прямой RTSP</b> (без моста)':esc(c.url)}</td></tr>`).join('');
+    const re = st.retrain || {};
+    const reHtml = re.running
+      ? `<span class="pill warn">переобучение идёт: ${esc(re.kind)} ${esc(re.subject||'')}</span>`
+      : (re.last ? `<span class="muted">последнее переобучение: ${esc(JSON.stringify(re.last.results||re.last))}</span>` : '');
     $('status').innerHTML =
       `<table><tr><th>Камера</th><th>HA-сущность</th><th>Состояние</th><th>Источник для Frigate</th></tr>${rows}</table>
-       <p>Модели: ${Object.entries(st.models).map(([k,v])=>`<span class="pill ${v==='ok'?'ok':'err'}">${k}: ${esc(v)}</span>`).join(' ')}
+       <p>Модели: ${Object.entries(st.models).map(([k,v])=>`<span class="pill ${v==='ok'?'ok':(v.startsWith('off')?'warn':'err')}">${k}: ${esc(v)}</span>`).join(' ')}
        &nbsp; Frigate: ${st.frigate?'<span class="pill ok">связь есть'+(st.frigate_version?` · v${esc(st.frigate_version)}`:'')+'</span>':'<span class="pill err">нет связи</span>'}
-       &nbsp; MQTT: ${esc(st.mqtt_host)} ${(st.stats&&st.stats.mqtt==='ok')?'<span class="pill ok">подключено</span>':(st.stats&&st.stats.mqtt?`<span class="pill err">${esc(st.stats.mqtt)}</span>`:'')}
-       &nbsp; Событий: ${st.stats.events_seen}, допусков: ${st.stats.grants}, отказов: ${st.stats.denied}, VLM: ${st.stats.vlm_calls}</p>`
+       &nbsp; MQTT: ${esc(st.mqtt_host)} ${(st.stats&&st.stats.mqtt==='ok')?'<span class="pill ok">подключено</span>':(st.stats&&st.stats.mqtt?`<span class="pill err">${esc(st.stats.mqtt)}</span>`:'')}</p>
+       <p>Событий: <span class="num">${st.stats.events_seen}</span>, допусков: <span class="num">${st.stats.grants}</span>,
+       отказов: <span class="num">${st.stats.denied}</span>,
+       <span class="${st.stats.alarms?'alarm pill':''}">тревог: ${st.stats.alarms||0}</span>, VLM: ${st.stats.vlm_calls}
+       &nbsp; ${reHtml}</p>`
        + (st.frigate_error ? `<p class="frigate-warn">⚠ ${esc(st.frigate_error)}</p>` : '')
        + (!st.frigate && st.frigate_addon_log
           ? `<details class="frigate-warn"><summary style="cursor:pointer;font-weight:600">Журнал аддона Frigate (последние строки — причина в конце)</summary><pre style="white-space:pre-wrap;margin:8px 0 0;font-size:11px;max-height:240px;overflow:auto">${esc(st.frigate_addon_log)}</pre></details>`
           : '');
+    // селект камер в фильтре журнала
+    const sel = $('fCamera');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">все камеры</option>' + Object.keys(st.bridge||{}).map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    sel.value = cur;
   } catch(e) { $('status').textContent = 'ошибка загрузки статуса: ' + (e && e.message ? e.message : e); }
-  try {
-    const s = await (await fetch(API('api/subjects'))).json();
-    fill('cars', s.cars, 'car'); fill('faces', s.faces, 'face');
-  } catch(e) {}
-  try {
-    const ev = (await (await fetch(API('api/events'))).json()).events || [];
-    $('events').innerHTML = ev.slice(0,20).map(e =>
-      `<div class="ev"><b>${new Date(e.ts*1000).toLocaleString()}</b><span class="pill">${e.kind}</span>
-       <span>${e.camera} — ${e.action}</span><span class="muted">${e.detail||''}</span></div>`).join('') || 'пусто';
-  } catch(e) {}
-}
-
-function fill(id, map, kind) {
-  const t = $(id);
-  t.innerHTML = '<tr><th>Имя</th><th>Фото</th><th></th></tr>' +
-    Object.entries(map||{}).map(([name,info]) =>
-      `<tr><td>${name}</td><td>${info.photos}</td>
-       <td><button class="danger" onclick="del('${kind}','${name.replace(/'/g,"\\'")}')">×</button></td></tr>`).join('') ||
-    `<tr><td colspan="3" class="muted">пусто — добавьте первое фото ниже</td></tr>`;
-}
-
-async function del(kind, subject) {
-  if (!confirm(`Удалить «${subject}» из базы?`)) return;
-  await fetch(API('api/subjects/delete'), {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({kind, subject})});
-  refresh();
-}
-
-async function enroll(kind) {
-  const name = $(kind==='car'?'carName':'faceName').value.trim();
-  const file = $(kind==='car'?'carPhoto':'facePhoto').files[0];
-  if (!name || !file) { alert('Укажите имя и выберите фото'); return; }
-  const fd = new FormData(); fd.append('kind', kind); fd.append('subject', name); fd.append('photo', file);
-  const r = await (await fetch(API('api/enroll'), {method:'POST', body: fd})).json();
-  alert(r.ok ? `Готово: +${r.added} эмбеддингов` : `Ошибка: ${r.error}`);
-  refresh();
 }
 
 async function toggleMaster() {
@@ -164,9 +258,192 @@ async function toggleMaster() {
   refresh();
 }
 
+/* ---------- машины / лица ---------- */
+const KINDS = { car: {title:'Машины («свои» на шлагбаум)', hint:'Сфотографируйте машину с камеры шлагбаума или загрузите файлы. Система сама сделает 8 вариантов (ночь/дождь/снег/контражур) — это «пре-трейн» базы.'},
+                face: {title:'Лица (калитка/дверь)', hint:'Крупное фото лица анфас, можно несколько файлов сразу. Добавляйте 2–3 фото с разных ракурсов на человека.'} };
+
+async function renderSubjectsPane(kind) {
+  const pane = $('pane-' + kind);
+  let map = {};
+  try { map = (await (await fetch(API('api/subjects'))).json())[kind + 's'] || {}; } catch(e) {}
+  const list = Object.entries(map).map(([name, info]) => {
+    const thumb = info.thumb ? API(`api/photo/${kind}/${encodeURIComponent(name)}/${encodeURIComponent(info.thumb)}`) : '';
+    return `<div class="subj">
+      ${thumb ? `<img class="thumb" src="${thumb}" alt="">` : '<div class="thumb" style="width:64px;height:64px;border-radius:8px;background:#eee"></div>'}
+      <div style="flex:1;min-width:150px"><div class="name">${esc(name)}</div>
+        <div class="meta">фото: ${info.photos} · прототипов: ${info.embeds}${info.updated?` · обновлено: ${new Date(info.updated*1000).toLocaleDateString()}`:''}</div></div>
+      <div class="row">
+        <button class="small" onclick="openGallery('${kind}','${escQ(name)}')">Фото</button>
+        <button class="small green" onclick="retrainSubject('${kind}','${escQ(name)}')">Переобучить</button>
+        <button class="small danger" onclick="delSubject('${kind}','${escQ(name)}')">Удалить</button>
+      </div></div>`;
+  }).join('') || '<p class="muted">пока пусто — добавьте первого ниже</p>';
+  pane.innerHTML = `<div class="card"><h2>${KINDS[kind].title}</h2>${list}
+    <div class="row" style="margin-top:10px">
+      <input type="text" id="${kind}Name" placeholder="Имя (например: ${kind==='car'?'Моя машина':'Жена'})">
+      <input type="file" id="${kind}Photo" accept="image/*" multiple>
+      <button class="green" onclick="enrollUI('${kind}')">Обучить</button>
+    </div>
+    <p class="hint">${KINDS[kind].hint}</p></div>`;
+}
+
+function escQ(s) { return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+
+async function enrollUI(kind) {
+  const name = $(kind+'Name').value.trim();
+  const files = $(kind+'Photo').files;
+  if (!name || !files.length) { alert('Укажите имя и выберите фото'); return; }
+  const fd = new FormData();
+  fd.append('kind', kind); fd.append('subject', name);
+  for (const f of files) fd.append('photo', f);
+  const r = await (await fetch(API('api/enroll'), {method:'POST', body: fd})).json();
+  const errs = r.errors && r.errors.length ? '\nОшибки: ' + r.errors.join('; ') : '';
+  alert(r.ok ? `Готово: файлов ${r.files}, добавлено ${r.added} эмбеддингов${errs}` : `Ошибка: ${(r.errors||[]).join('; ')}`);
+  renderSubjectsPane(kind);
+}
+
+async function delSubject(kind, subject) {
+  if (!confirm(`Удалить «${subject}» из базы вместе со всеми фото?`)) return;
+  await fetch(API('api/subjects/delete'), {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({kind, subject})});
+  renderSubjectsPane(kind);
+}
+
+async function retrainSubject(kind, subject) {
+  const r = await (await fetch(API('api/retrain'), {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({kind, subject})})).json();
+  if (!r.ok) { alert(r.error || 'не удалось запустить'); return; }
+  alert('Переобучение запущено — статус в разделе «Статус»');
+}
+
+/* ---------- галерея фото ---------- */
+let GAL = {kind:null, subject:null, photos:[], sel:new Set()};
+
+async function openGallery(kind, subject) {
+  GAL = {kind, subject, photos: [], sel: new Set()};
+  $('galleryTitle').textContent = `Фото: ${subject}`;
+  $('galleryModal').style.display = 'block';
+  $('galleryGrid').innerHTML = '<span class="muted">загрузка…</span>';
+  const r = await (await fetch(API(`api/photos?kind=${kind}&subject=${encodeURIComponent(subject)}`))).json();
+  GAL.photos = r.photos || [];
+  $('delSelBtn').disabled = true;
+  $('galleryGrid').innerHTML = GAL.photos.map(p =>
+    `<div class="ph" id="ph_${esc(p.file)}" onclick="toggleSel('${escQ(p.file)}')">
+       <img src="${API('api/photo/'+kind+'/'+encodeURIComponent(subject)+'/'+encodeURIComponent(p.file))}" alt="" loading="lazy">
+       <div class="fname">${esc(p.file)} · ${new Date(p.ts*1000).toLocaleString()}</div></div>`).join('')
+    || '<span class="muted">фото нет — добавьте кнопкой «+ Добавить фото»</span>';
+}
+function closeGallery() { $('galleryModal').style.display = 'none'; if (GAL.kind) renderSubjectsPane(GAL.kind); }
+function toggleSel(file) {
+  const el = $('ph_' + file.replace(/[^A-Za-z0-9_.-]/g, c => '_'));
+  if (GAL.sel.has(file)) { GAL.sel.delete(file); el.classList.remove('sel'); }
+  else { GAL.sel.add(file); el.classList.add('sel'); }
+  $('delSelBtn').disabled = !GAL.sel.size;
+}
+async function addPhotos(input) {
+  if (!input.files.length) return;
+  const fd = new FormData();
+  fd.append('kind', GAL.kind); fd.append('subject', GAL.subject);
+  for (const f of input.files) fd.append('photo', f);
+  const r = await (await fetch(API('api/enroll'), {method:'POST', body: fd})).json();
+  alert(r.ok ? `Добавлено: ${r.added} эмбеддингов из ${r.files} фото${r.errors&&r.errors.length?'\nОшибки: '+r.errors.join('; '):''}` : 'Ошибка: ' + (r.errors||[]).join('; '));
+  input.value = '';
+  openGallery(GAL.kind, GAL.subject);
+}
+async function deleteSelected() {
+  if (!GAL.sel.size) return;
+  if (!confirm(`Удалить выбранные фото (${GAL.sel.size}) и переобучить «${GAL.subject}»?`)) return;
+  const r = await (await fetch(API('api/photos/delete'), {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({kind: GAL.kind, subject: GAL.subject, files: [...GAL.sel]})})).json();
+  alert(r.ok ? `Удалено фото: ${r.deleted}` : (r.error || 'ошибка'));
+  closeGallery();
+}
+function retrainCurrent() {
+  if (GAL.kind) retrainSubject(GAL.kind, GAL.subject);
+}
+
+/* ---------- жесты и тревога ---------- */
+async function refreshSettings() {
+  try {
+    const st = CUR_STATUS || await (await fetch(API('api/status'))).json();
+    $('gestEnabled').checked = !!st.gestures.enabled;
+    $('alarmEnabled').checked = !!st.alarm.enabled;
+    $('gestStatus').innerHTML = st.gestures.available
+      ? `Модель жестов: <span class="pill ok">ok</span> · подтверждение: ${esc(st.gestures.confirm)} · тревога: ${esc(st.gestures.alarm_gesture)}`
+      : `Модель жестов: <span class="pill err">${esc(st.gestures.model)}</span> — жесты недоступны`;
+    const a = st.alarm;
+    $('alarmInfo').innerHTML =
+      `Аддон SIP: <b>${esc(a.addon || 'не задан')}</b> · номеров: <b>${(a.numbers||[]).length}</b>${(a.numbers||[]).length?': '+a.numbers.map(n=>`<code>${esc(n)}</code>`).join(' '):''}
+       · гудков: ${esc(a.ring_timeout||15)} с<br>Текст звонка: «${esc(a.message_template)}»
+       <br><span class="muted">Плейсхолдеры: {name} — имя, {camera} — камера, {time} — ЧЧ:ММ, {date} — дата. Озвучка — TTS-движком HA (Piper).</span>`;
+  } catch(e) {}
+}
+async function saveSetting(key, value) {
+  const r = await (await fetch(API('api/settings'), {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({[key]: value})})).json();
+  refresh(); refreshSettings();
+}
+async function alarmTest() {
+  const r = await (await fetch(API('api/alarm/test'), {method:'POST'})).json();
+  alert(r.ok ? `Тест звонка отправлен на ${r.numbers} номер(а) через ${r.addon}` : (r.error || 'ошибка'));
+}
+
+/* ---------- журнал ---------- */
+async function loadJournal() {
+  const p = new URLSearchParams();
+  if ($('fKind').value) p.set('kind', $('fKind').value);
+  if ($('fAction').value) p.set('action', $('fAction').value);
+  if ($('fCamera').value) p.set('camera', $('fCamera').value);
+  if ($('fSubject').value.trim()) p.set('subject', $('fSubject').value.trim());
+  if ($('fScoreMin').value !== '') p.set('score_min', $('fScoreMin').value);
+  if ($('fScoreMax').value !== '') p.set('score_max', $('fScoreMax').value);
+  for (const [inp, key] of [['fFrom','from'], ['fTo','to']]) {
+    const v = $(inp).value;
+    if (v) p.set(key, String(new Date(v).getTime() / 1000));
+  }
+  p.set('limit', '300');
+  let ev = [];
+  try { ev = (await (await fetch(API('api/events?' + p.toString()))).json()).events || []; } catch(e) {}
+  const actPill = (a) => {
+    if (a === 'alarm') return '<span class="pill alarm">ТРЕВОГА</span>';
+    const m = {opened:'ok', detected:'ok', enrolled:'ok', retrained:'ok',
+               unknown:'warn', gesture_wait:'warn', denied:'err'};
+    return `<span class="pill ${m[a]||''}">${esc(a)}</span>`;
+  };
+  $('events').innerHTML = ev.map(e =>
+    `<div class="ev"><b>${new Date(e.ts*1000).toLocaleString()}</b>
+     <span class="pill">${e.kind}</span> ${actPill(e.action)}
+     <span><b>${esc(e.camera)}</b> — ${esc(e.detail||'')}</span>
+     ${e.score?`<span class="pill num">score ${e.score}</span>`:''}</div>`).join('') || 'пусто — по фильтру ничего не найдено';
+  // архивы
+  try {
+    const ar = (await (await fetch(API('api/events/archives'))).json()).archives || [];
+    $('archives').innerHTML = ar.map(a =>
+      `<div class="row" style="margin:4px 0"><span>${esc(a.file)}</span>
+       <span class="muted">${new Date(a.ts*1000).toLocaleString()} · ${(a.size/1024).toFixed(1)} КБ</span>
+       <a class="button small ghost" style="text-decoration:none;padding:5px 10px;border-radius:8px;font-size:12px" href="${API('api/events/archive-file?name='+encodeURIComponent(a.file))}" download>Скачать</a></div>`).join('') || 'архивов пока нет';
+  } catch(e) { $('archives').textContent = 'ошибка загрузки архивов'; }
+}
+function resetFilters() {
+  ['fSubject','fScoreMin','fScoreMax','fFrom','fTo'].forEach(id => $(id).value = '');
+  $('fKind').value = ''; $('fAction').value = ''; $('fCamera').value = '';
+  loadJournal();
+}
+async function archiveEvents() {
+  const r = await (await fetch(API('api/events/archive'), {method:'POST'})).json();
+  alert(r.ok ? `Журнал (${r.count} событий) сохранён в архив: ${r.name}` : (r.error || 'ошибка'));
+  loadJournal();
+}
+async function clearEvents() {
+  if (!confirm('Очистить журнал БЕЗ сохранения в архив?')) return;
+  await fetch(API('api/events/clear'), {method:'POST'});
+  loadJournal();
+}
+
+/* ---------- конфиг frigate ---------- */
 async function loadFrigate() { $('frigateCfg').value = await (await fetch(API('api/frigate-config'))).text(); }
 
-refresh(); setInterval(refresh, 5000);
+refresh(); refreshSettings(); setInterval(refresh, 5000);
 </script>
 </body>
 </html>

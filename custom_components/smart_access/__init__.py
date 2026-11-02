@@ -1,10 +1,17 @@
 """Интеграция Smart Access: мост между HA и аддоном smart-access-core по MQTT.
 
 Зона ответственности интеграции:
-  * сервисы (кнопка «Обучить» на карточках, тест-распознавание);
+  * сервисы (кнопка «Обучить» на карточках, тест-распознавание, переобучение);
   * сенсоры статуса/последнего события;
-  * события HA (smart_access_ack) для автоматизаций;
+  * события HA (smart_access_ack, smart_access_event) для автоматизаций;
+  * уведомления об инцидентах (тревожный жест);
   * UI-настройки (имена «своих» и привязка камер) — OptionsFlow.
+
+ВАЖНО (v1.2.0): сервисы регистрируются в async_setup — сразу после загрузки
+интеграции, даже если config entry ещё не создан и/или брокер MQTT не готов.
+Раньше регистрация стояла в async_setup_entry ПОСЛЕ подписок MQTT: если брокер
+не отвечал, setup entry падал и карточки получали «Действие
+smart_access.enroll не найдено».
 
 Всё общение с ядром — через локальный Mosquitto, никаких внешних зависимостей.
 """
@@ -33,6 +40,7 @@ from .const import (
     SIGNAL_STATUS,
     TOPIC_ACK,
     TOPIC_CMD_IDENTIFY,
+    TOPIC_CMD_RETRAIN,
     TOPIC_ENROLL_CAR,
     TOPIC_ENROLL_FACE,
     TOPIC_EVENT,
@@ -48,6 +56,7 @@ PLATFORMS = ["sensor"]
 
 SERVICE_ENROLL = "enroll"
 SERVICE_IDENTIFY = "identify"
+SERVICE_RETRAIN = "retrain"
 
 ENROLL_SCHEMA = vol.Schema(
     {
@@ -61,6 +70,13 @@ IDENTIFY_SCHEMA = vol.Schema(
     {
         vol.Required("entity_id"): str,
         vol.Optional("kind", default="car"): vol.In(["car", "face"]),
+    }
+)
+
+RETRAIN_SCHEMA = vol.Schema(
+    {
+        vol.Required("kind"): vol.In(["car", "face"]),
+        vol.Optional("subject"): str,
     }
 )
 
@@ -78,60 +94,30 @@ def _parse_map(raw: str) -> dict[str, str]:
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Сервисы доступны сразу после установки интеграции — БЕЗ config entry.
+
+    Именно это чинит «Действие smart_access.enroll не найдено» на карточках:
+    раньше сервисы появлялись только после успешного завершения
+    async_setup_entry (а он падал без MQTT / без завершённого config flow).
+    """
+    _ensure_services(hass)
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    hass.data.setdefault(DOMAIN, {})
-    data = hass.data[DOMAIN].setdefault("state", {"status": {}, "last_event": {}, "ack": {}})
-    data.setdefault("options", {})
-    data["options"] = {
-        CONF_CAR_SUBJECTS: entry.options.get(CONF_CAR_SUBJECTS, "Моя машина, Машина жены"),
-        CONF_FACE_SUBJECTS: entry.options.get(CONF_FACE_SUBJECTS, "Я, Жена, Сын, Дочь"),
-        CONF_ENROLL_MAP: entry.options.get(CONF_ENROLL_MAP, ""),
-    }
-
-    @callback
-    def on_status(msg: mqtt.ReceiveMessage) -> None:
-        try:
-            payload = json.loads(msg.payload)
-        except ValueError:
-            return
-        data["status"] = payload
-        async_dispatcher_send(hass, SIGNAL_STATUS, payload)
-
-    @callback
-    def on_event(msg: mqtt.ReceiveMessage) -> None:
-        try:
-            payload = json.loads(msg.payload)
-        except ValueError:
-            return
-        data["last_event"] = payload
-        hass.bus.async_fire(f"{DOMAIN}_event", payload)
-        async_dispatcher_send(hass, SIGNAL_EVENT, payload)
-
-    @callback
-    def on_ack(msg: mqtt.ReceiveMessage) -> None:
-        try:
-            payload = json.loads(msg.payload)
-        except ValueError:
-            return
-        hass.bus.async_fire(EVENT_ACK, payload)
-
-    unsub = [
-        await mqtt.async_subscribe(hass, TOPIC_STATUS, on_status, qos=1),
-        await mqtt.async_subscribe(hass, TOPIC_EVENT, on_event, qos=1),
-        await mqtt.async_subscribe(hass, TOPIC_ACK, on_ack, qos=1),
-    ]
-    entry.async_on_unload(*unsub)
+def _ensure_services(hass: HomeAssistant) -> None:
+    """Регистрирует сервисы один раз (идемпотентно)."""
+    if hass.services.has_service(DOMAIN, SERVICE_ENROLL):
+        return
 
     async def svc_enroll(call: ServiceCall) -> None:
+        state = hass.data.get(DOMAIN, {}).get("state", {})
+        options: dict[str, Any] = state.get("options", {})
         entity_id = call.data["entity_id"].strip()
         subject = call.data["subject"].strip()
         kind = call.data.get("kind", "auto")
 
         if kind == "auto":
-            mapping = _parse_map(data["options"].get(CONF_ENROLL_MAP, ""))
+            mapping = _parse_map(options.get(CONF_ENROLL_MAP, "") or "")
             spec = mapping.get(entity_id, "")
             kind = "face" if spec.startswith("face") else "car"
 
@@ -158,9 +144,78 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             qos=1,
         )
 
-    if not hass.services.has_service(DOMAIN, SERVICE_ENROLL):
-        hass.services.async_register(DOMAIN, SERVICE_ENROLL, svc_enroll, schema=ENROLL_SCHEMA)
-        hass.services.async_register(DOMAIN, SERVICE_IDENTIFY, svc_identify, schema=IDENTIFY_SCHEMA)
+    async def svc_retrain(call: ServiceCall) -> None:
+        """Переобучение базы по фактическим фото (удалили ошибочные — переобучи)."""
+        payload = {"kind": call.data["kind"]}
+        if call.data.get("subject"):
+            payload["subject"] = call.data["subject"].strip()
+        await mqtt.async_publish(
+            hass, TOPIC_CMD_RETRAIN,
+            json.dumps(payload, ensure_ascii=False), qos=1,
+        )
+        LOG.info("Переобучение отправлено: %s", payload)
+
+    hass.services.async_register(DOMAIN, SERVICE_ENROLL, svc_enroll, schema=ENROLL_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_IDENTIFY, svc_identify, schema=IDENTIFY_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_RETRAIN, svc_retrain, schema=RETRAIN_SCHEMA)
+    LOG.info("Сервисы %s зарегистрированы: enroll, identify, retrain", DOMAIN)
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    hass.data.setdefault(DOMAIN, {})
+    data = hass.data[DOMAIN].setdefault("state", {"status": {}, "last_event": {}, "ack": {}})
+    data.setdefault("options", {})
+    data["options"] = {
+        CONF_CAR_SUBJECTS: entry.options.get(CONF_CAR_SUBJECTS, "Моя машина, Машина жены"),
+        CONF_FACE_SUBJECTS: entry.options.get(CONF_FACE_SUBJECTS, "Я, Жена, Сын, Дочь"),
+        CONF_ENROLL_MAP: entry.options.get(CONF_ENROLL_MAP, ""),
+    }
+
+    # сервисы могли не зарегистрироваться в async_setup (например интеграция
+    # обновлена поверх работающего HA) — страхуемся
+    _ensure_services(hass)
+
+    @callback
+    def on_status(msg: mqtt.ReceiveMessage) -> None:
+        try:
+            payload = json.loads(msg.payload)
+        except ValueError:
+            return
+        data["status"] = payload
+        async_dispatcher_send(hass, SIGNAL_STATUS, payload)
+
+    @callback
+    def on_event(msg: mqtt.ReceiveMessage) -> None:
+        try:
+            payload = json.loads(msg.payload)
+        except ValueError:
+            return
+        data["last_event"] = payload
+        hass.bus.async_fire(f"{DOMAIN}_event", payload)
+        async_dispatcher_send(hass, SIGNAL_EVENT, payload)
+        if payload.get("action") == "alarm" or payload.get("alarm"):
+            _notify_alarm(hass, payload)
+
+    @callback
+    def on_ack(msg: mqtt.ReceiveMessage) -> None:
+        try:
+            payload = json.loads(msg.payload)
+        except ValueError:
+            return
+        hass.bus.async_fire(EVENT_ACK, payload)
+
+    # подписки безопасны: отсутствие/неготовность брокера НЕ должно ломать
+    # загрузку интеграции (иначе пропадают уже зарегистрированные сервисы)
+    for topic, handler in (
+        (TOPIC_STATUS, on_status),
+        (TOPIC_EVENT, on_event),
+        (TOPIC_ACK, on_ack),
+    ):
+        try:
+            unsub = await mqtt.async_subscribe(hass, topic, handler, qos=1)
+            entry.async_on_unload(unsub)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("MQTT-подписка %s не выполнена (брокер не готов?): %s", topic, exc)
 
     # Бренд-иконка интеграции (без авторизации): entity_picture и карточки
     try:
@@ -172,6 +227,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+@callback
+def _notify_alarm(hass: HomeAssistant, payload: dict) -> None:
+    """Инцидент (тревожный жест): постоянное уведомление в HA."""
+    subject = payload.get("subject") or "неизвестный"
+    camera = payload.get("camera") or "?"
+    score = payload.get("score")
+    text = (
+        f"Человек, распознанный как «{subject}» (score={score}), открыл калитку на камере "
+        f"«{camera}» С ТРЕВОЖНЫМ ЖЕСТОМ (обе руки вверх). Возможна угроза — проверьте "
+        f"видео и звонки. Звонок по тревожным номерам отправлен (если настроен)."
+    )
+    hass.async_create_task(hass.services.async_call(
+        "persistent_notification", "create",
+        {"title": "Smart Access: ТРЕВОГА", "message": text, "notification_id": "smart_access_alarm"},
+        blocking=False,
+    ))
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

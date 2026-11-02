@@ -14,6 +14,7 @@ HA система продолжает работать (fail-safe: никаки
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -128,6 +129,22 @@ async def main() -> None:
                 for c in conf.cameras
             },
             "stats": brain.stats,
+            "gestures": {
+                "enabled": bool((conf.gestures or {}).get("enabled")),
+                "model": models_.status.get("pose", "?"),
+                "available": models_.gestures_ok,
+                "confirm": "одна рука вверх",
+                "alarm_gesture": "обе руки вверх",
+            },
+            "alarm": {
+                "enabled": bool((conf.alarm or {}).get("enabled")),
+                "addon": (conf.alarm or {}).get("addon") or "",
+                "numbers": [n.strip() for n in str((conf.alarm or {}).get("numbers") or "").splitlines() if n.strip()],
+                "ring_timeout": (conf.alarm or {}).get("ring_timeout"),
+                "message_template": (conf.alarm or {}).get("message_template") or "",
+                "tts_language": (conf.alarm or {}).get("language") or "ru",
+            },
+            "retrain": brain.retrain_status,
         })
 
     async def handle_config(_req: web.Request) -> web.Response:
@@ -168,23 +185,166 @@ async def main() -> None:
         return web.json_response({"ok": ok})
 
     async def handle_enroll(req: web.Request) -> web.Response:
-        """Прямой enrollment (файл/фото из UI): multipart form."""
+        """Прямой enrollment (фото из UI): multipart form, photo может повторяться."""
         reader = await req.multipart()
-        kind, subject, jpg = "car", "", None
-        async for part in reader:
-            if part.name == "kind":
-                kind = (await part.text()).strip()
-            elif part.name == "subject":
-                subject = (await part.text()).strip()
-            elif part.name == "photo":
-                jpg = await part.read(decode=False)
-        if jpg is None or not subject:
+        kind, subject, jpgs = "car", "", []
+        try:
+            async for part in reader:
+                if part.name == "kind":
+                    kind = (await part.text()).strip()
+                elif part.name == "subject":
+                    subject = (await part.text()).strip()
+                elif part.name == "photo":
+                    jpgs.append(await part.read(decode=False))
+        except ValueError:
+            pass
+        if not jpgs or not subject:
             return web.json_response({"ok": False, "error": "нужны subject и photo"}, status=400)
-        result = await loop.run_in_executor(None, brain.enroll, kind, subject, jpg)
-        return web.json_response(result)
+        if kind not in ("car", "face"):
+            return web.json_response({"ok": False, "error": "kind must be car|face"}, status=400)
+        added, errors = 0, []
+        for jpg in jpgs:
+            result = await loop.run_in_executor(None, brain.enroll, kind, subject, jpg)
+            if result.get("ok"):
+                added += int(result.get("added") or 0)
+            else:
+                errors.append(str(result.get("error") or "ошибка"))
+        return web.json_response({
+            "ok": added > 0 or not errors,
+            "added": added, "files": len(jpgs),
+            "errors": errors,
+        })
 
-    async def handle_events(_req: web.Request) -> web.Response:
-        return web.json_response({"events": store.events[:80]})
+    async def handle_events(req: web.Request) -> web.Response:
+        q = req.rel_url.query
+        def _fnum(key):
+            v = q.get(key)
+            if v is None or v == "":
+                return None
+            try:
+                return float(v)
+            except ValueError:
+                return None
+        filters = {
+            "kind": (q.get("kind") or "").strip() or None,
+            "action": (q.get("action") or "").strip() or None,
+            "camera": (q.get("camera") or "").strip() or None,
+            "subject": (q.get("subject") or "").strip() or None,
+            "score_min": _fnum("score_min"),
+            "score_max": _fnum("score_max"),
+            "from": _fnum("from"),
+            "to": _fnum("to"),
+        }
+        try:
+            limit = min(1000, max(1, int(q.get("limit") or 200)))
+        except ValueError:
+            limit = 200
+        return web.json_response({"events": store.query_events(filters, limit)})
+
+    async def handle_photos(req: web.Request) -> web.Response:
+        """Список фото subject: /api/photos?kind=face&subject=Я"""
+        q = req.rel_url.query
+        kind = (q.get("kind") or "").strip()
+        subject = (q.get("subject") or "").strip()
+        if kind not in ("car", "face") or not subject:
+            return web.json_response({"ok": False, "error": "нужны kind=car|face и subject"}, status=400)
+        try:
+            return web.json_response({"ok": True, "photos": store.list_photos(kind, subject)})
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+    async def handle_photo(req: web.Request) -> web.Response:
+        """Раздача фото: /api/photo/{kind}/{subject}/{file} (для <img src>)."""
+        kind = req.match_info.get("kind", "")
+        subject = req.match_info.get("subject", "")
+        fname = req.match_info.get("file", "")
+        kind = {"cars": "car", "faces": "face"}.get(kind, kind)
+        if kind not in ("car", "face"):
+            return web.json_response({"ok": False, "error": "bad kind"}, status=400)
+        p = store.photo_path(kind, subject, fname)
+        if p is None:
+            return web.json_response({"ok": False, "error": "фото не найдено"}, status=404)
+        return web.FileResponse(p)
+
+    async def handle_photos_delete(req: web.Request) -> web.Response:
+        """Удаление ошибочных фото + авто-переобучение subject."""
+        body = await req.json()
+        kind = str(body.get("kind") or "")
+        subject = str(body.get("subject") or "")
+        files = body.get("files") or []
+        if kind not in ("car", "face") or not subject or not files:
+            return web.json_response({"ok": False, "error": "нужны kind, subject, files[]"}, status=400)
+        try:
+            deleted = store.delete_photos(kind, subject, files)
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        # после удаления прототипы должны соответствовать факту: переобучаем
+        started = brain.retrain_async(kind, subject)
+        return web.json_response({"ok": True, "deleted": deleted, "retrain_started": started})
+
+    async def handle_retrain(req: web.Request) -> web.Response:
+        """Переобучение: /api/retrain {kind, subject?} — фон, статус в /api/status.retrain."""
+        body = await req.json()
+        kind = str(body.get("kind") or "")
+        subject = str(body.get("subject") or "").strip() or None
+        if kind not in ("car", "face"):
+            return web.json_response({"ok": False, "error": "kind must be car|face"}, status=400)
+        ok = brain.retrain_async(kind, subject)
+        if not ok:
+            return web.json_response({"ok": False, "error": "переобучение уже идёт"}, status=409)
+        return web.json_response({"ok": True, "started": True})
+
+    async def handle_settings_get(_req: web.Request) -> web.Response:
+        return web.json_response({
+            "gestures_enabled": bool((cfg.CONF.gestures or {}).get("enabled")),
+            "alarm_enabled": bool((cfg.CONF.alarm or {}).get("enabled")),
+        })
+
+    async def handle_settings_post(req: web.Request) -> web.Response:
+        """Переключатели панели: /data/settings.json (переживают перенастройку)."""
+        body = await req.json()
+        sp = os.path.join(cfg.DATA_DIR, "settings.json")
+        cur: dict = {}
+        try:
+            with open(sp, "r", encoding="utf-8") as fh:
+                cur = json.load(fh)
+        except Exception:  # noqa: BLE001
+            cur = {}
+        for key in ("gestures_enabled", "alarm_enabled"):
+            if key in body and isinstance(body[key], bool):
+                cur[key] = body[key]
+        import json as _json
+        tmp = sp + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            _json.dump(cur, fh)
+        os.replace(tmp, sp)
+        cfg.reload_conf()
+        brain.publish_status()
+        return web.json_response({"ok": True, **{
+            "gestures_enabled": bool((cfg.CONF.gestures or {}).get("enabled")),
+            "alarm_enabled": bool((cfg.CONF.alarm or {}).get("enabled")),
+        }})
+
+    async def handle_alarm_test(_req: web.Request) -> web.Response:
+        return web.json_response(brain.alarm_test())
+
+    async def handle_events_archive(_req: web.Request) -> web.Response:
+        return web.json_response(store.archive_events())
+
+    async def handle_events_clear(_req: web.Request) -> web.Response:
+        count = store.clear_events()
+        LOG.warning("Журнал очищен (%s событий) из панели", count)
+        return web.json_response({"ok": True, "cleared": count})
+
+    async def handle_events_archives(_req: web.Request) -> web.Response:
+        return web.json_response({"archives": store.list_archives()})
+
+    async def handle_events_archive_file(req: web.Request) -> web.Response:
+        name = req.rel_url.query.get("name") or ""
+        p = store.archive_path(name)
+        if p is None or not os.path.isfile(p):
+            return web.json_response({"ok": False, "error": "архив не найден"}, status=404)
+        return web.FileResponse(p)
 
     async def handle_frigate_config(_req: web.Request) -> web.Response:
         return web.Response(
@@ -202,6 +362,17 @@ async def main() -> None:
     app.router.add_post("/api/subjects/delete", handle_subject_delete)
     app.router.add_post("/api/enroll", handle_enroll)
     app.router.add_get("/api/events", handle_events)
+    app.router.add_post("/api/events/archive", handle_events_archive)
+    app.router.add_post("/api/events/clear", handle_events_clear)
+    app.router.add_get("/api/events/archives", handle_events_archives)
+    app.router.add_get("/api/events/archive-file", handle_events_archive_file)
+    app.router.add_get("/api/photos", handle_photos)
+    app.router.add_get("/api/photo/{kind}/{subject}/{file}", handle_photo)
+    app.router.add_post("/api/photos/delete", handle_photos_delete)
+    app.router.add_post("/api/retrain", handle_retrain)
+    app.router.add_get("/api/settings", handle_settings_get)
+    app.router.add_post("/api/settings", handle_settings_post)
+    app.router.add_post("/api/alarm/test", handle_alarm_test)
     app.router.add_get("/api/frigate-config", handle_frigate_config)
     if UI_DIR.exists():
         app.router.add_static("/ui/", UI_DIR)

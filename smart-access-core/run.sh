@@ -14,7 +14,21 @@ if [ ! -s /models/clip_vision_q.onnx ] || [ ! -s /models/sface.onnx ] || [ ! -s 
         "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx" || true
     MODELS_DIR=/data/models
 fi
+# Модель поз (жесты, v1.2.0): опциональна — без неё жесты отключены, остальное работает.
+if [ ! -s /models/yolov8n-pose.onnx ] && [ ! -s /data/models/yolov8n-pose.onnx ]; then
+    bashio::log.warning "Модель жестов yolov8n-pose.onnx отсутствует — докачиваю в /data/models (жесты без неё отключены)"
+    curl -sSL --retry 3 -o /data/models/yolov8n-pose.onnx \
+        "https://huggingface.co/Xenova/yolov8n-pose/resolve/main/onnx/model_quantized.onnx" || true
+fi
+if [ ! -s /models/yolov8n-pose.onnx ] && [ -s /data/models/yolov8n-pose.onnx ]; then
+    MODELS_DIR=/data/models
+fi
 export SMART_ACCESS_MODELS_DIR="$MODELS_DIR"
+# Pose-модель могла остаться в /models, когда остальные докачаны в /data/models:
+# models.py умеет искать её по отдельному пути.
+if [ -s /models/yolov8n-pose.onnx ] && [ "$MODELS_DIR" != "/models" ]; then
+    export SMART_ACCESS_POSE_MODEL=/models/yolov8n-pose.onnx
+fi
 
 bashio::log.info "Запуск Smart Access Core..."
 exec python3 -u /app/app/main.py

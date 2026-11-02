@@ -49,10 +49,11 @@ class Brain:
         self.on_status = on_status
         self.client: mqtt.Client | None = None
         self.stats: dict[str, Any] = {
-            "events_seen": 0, "grants": 0, "denied": 0,
+            "events_seen": 0, "grants": 0, "denied": 0, "alarms": 0,
             "vlm_calls": 0, "last_grant": None, "started": time.time(),
             "mqtt": "подключение…",
         }
+        self.retrain_status: dict[str, Any] = {"running": False}
         self._seen_events: dict[str, float] = {}
         self._confirm: dict[str, dict[str, float]] = {}  # event_id -> {subject, count, score}
         self._cooldowns: dict[str, float] = {}           # cam|subject -> ts
@@ -284,12 +285,36 @@ class Brain:
                 self.stats["denied"] += 1
             return
 
+        # --- жесты (v1.2.0): подтверждение открытия + тревожный жест ---
+        gest = conf.gestures or {}
+        gestures_on = bool(gest.get("enabled")) and self.models.gestures_ok
+        if gestures_on:
+            g = self.models.detect_gesture(jpg_full)
+            if g.get("alarm"):
+                # обе руки вверх = тревога: открыть И одновременно послать инцидент
+                self._processed.add(event_id)
+                LOG.warning("ALARM: %s на %s — тревожный жест (обе руки вверх), score=%.3f",
+                            best_subject, name, best_score)
+                self._grant("face", cam, best_subject, best_score,
+                            best_face_jpg or jpg_full, alarm=True)
+                return
+            if not g.get("confirm"):
+                # лицо своё, но жеста-подтверждения нет — НЕ открываем
+                if event_id not in self._unknown_logged:
+                    self._unknown_logged.add(event_id)
+                    self._log_event(
+                        "face", name, "gesture_wait",
+                        f"{best_subject} score={best_score:.3f} — ждём жест (одна рука вверх)",
+                        best_score, best_subject)
+                return
+
         self._processed.add(event_id)
         self._grant("face", cam, best_subject, best_score, best_face_jpg or jpg_full)
 
     # ---------------- открытие ----------------
 
-    def _grant(self, kind: str, cam: dict[str, Any], subject: str, score: float, jpg: bytes) -> None:
+    def _grant(self, kind: str, cam: dict[str, Any], subject: str, score: float,
+               jpg: bytes, alarm: bool = False) -> None:
         conf = cfg.CONF
         name = cam["name"]
         cooldown = int(cam.get("cooldown", 45))
@@ -301,17 +326,27 @@ class Brain:
         self._cooldowns[key] = now
 
         self.stats["grants"] += 1
-        self.stats["last_grant"] = {"camera": name, "subject": subject, "score": round(score, 3), "ts": now}
+        self.stats["last_grant"] = {"camera": name, "subject": subject,
+                                    "score": round(score, 3), "ts": now, "alarm": alarm}
 
-        action = "opened" if (cam.get("executor_service") or "").strip() else "detected"
-        self._log_event(kind, name, action, f"{subject} score={score:.3f}", score, subject)
+        if alarm:
+            action = "alarm"
+            detail = f"{subject} score={score:.3f} — ТРЕВОЖНЫЙ ЖЕСТ (обе руки вверх)"
+        else:
+            action = "opened" if (cam.get("executor_service") or "").strip() else "detected"
+            detail = f"{subject} score={score:.3f}"
+        self._log_event(kind, name, action, detail, score, subject)
 
         payload_event = {
             "kind": kind, "camera": name, "camera_entity": cam.get("ha_entity"),
             "subject": subject, "score": round(score, 3), "action": action,
+            "alarm": alarm, "ts": now,
         }
         if self.client:
             self.client.publish("smart_access/event", json.dumps(payload_event, ensure_ascii=False), qos=1)
+
+        if alarm:
+            self._alarm(kind, cam, subject, score)
 
         service = (cam.get("executor_service") or "").strip()
         target = (cam.get("executor_target") or "").strip()
@@ -323,6 +358,147 @@ class Brain:
             ok = ha_api.call_ha_service(domain, svc, data)
             if not ok:
                 LOG.error("Не удалось открыть (%s.%s) — событие уже отправлено в MQTT", domain, svc)
+
+    # ---------------- тревога (SIP-звонки через ha-sip + TTS Piper) ----------------
+
+    def _alarm(self, kind: str, cam: dict[str, Any], subject: str, score: float) -> None:
+        """Инцидент безопасности: звонок на тревожные номера с сообщением.
+
+        Звонок — hassio.addon_stdin в аддон ha-sip: command=dial, number,
+        menu.message = ТЕКСТ (ha-sip озвучивает его TTS-движком HA —
+        у пользователя установлен Piper). post_action=hangup — трубка
+        ложится после проигрывания сообщения.
+        """
+        alarm = cfg.CONF.alarm or {}
+        self.stats["alarms"] = self.stats.get("alarms", 0) + 1
+
+        numbers = [n.strip() for n in str(alarm.get("numbers") or "").splitlines() if n.strip()]
+        addon = str(alarm.get("addon") or "").strip() or "c7744bff_ha-sip"
+        template = str(alarm.get("message_template") or
+                       "Тревога! {time}, {name} открыл калитку с тревожным жестом.")
+        language = str(alarm.get("language") or "ru")
+        ring_timeout = int(alarm.get("ring_timeout") or 15)
+        sip_account = int(alarm.get("sip_account") or 1)
+        display = cam.get("display_name") or cam["name"]
+        message = template.format(
+            name=subject, camera=display, kind=kind,
+            time=time.strftime("%H:%M"), date=time.strftime("%d.%m.%Y"),
+        )
+        if not alarm.get("enabled"):
+            LOG.warning("ALARM: инцидент %s/%s — звонки отключены (alarm.enabled=false)",
+                        cam["name"], subject)
+            return
+        if not numbers:
+            LOG.warning("ALARM: инцидент %s/%s — список тревожных номеров пуст",
+                        cam["name"], subject)
+            return
+        # звонки — в отдельном потоке: не блокируем MQTT-обработку
+        threading.Thread(
+            target=self._dial_numbers,
+            args=(addon, numbers, message, language, ring_timeout, sip_account),
+            daemon=True, name="sa-alarm-dial",
+        ).start()
+
+    @staticmethod
+    def _dial_numbers(addon: str, numbers: list[str], message: str,
+                      language: str, ring_timeout: int, sip_account: int) -> None:
+        for num in numbers:
+            data = {
+                "addon": addon,
+                "input": {
+                    "command": "dial",
+                    "number": num,
+                    "ring_timeout": ring_timeout,
+                    "sip_account": sip_account,
+                    "menu": {"message": message, "language": language,
+                             "post_action": "hangup"},
+                },
+            }
+            ok = ha_api.call_ha_service("hassio", "addon_stdin", data)
+            LOG.warning("ALARM: звонок %s через %s -> %s",
+                        num, addon, "отправлен" if ok else "НЕ удался")
+
+    def alarm_test(self) -> dict[str, Any]:
+        """Тест тревоги из панели: контрольный звонок на все номера."""
+        alarm = cfg.CONF.alarm or {}
+        numbers = [n.strip() for n in str(alarm.get("numbers") or "").splitlines() if n.strip()]
+        if not numbers:
+            return {"ok": False,
+                    "error": "список тревожных номеров пуст (Конфигурация аддона → alarm.numbers)"}
+        addon = str(alarm.get("addon") or "").strip() or "c7744bff_ha-sip"
+        language = str(alarm.get("language") or "ru")
+        message = f"Тест тревоги Smart Access. Время {time.strftime('%H:%M')}. Связь с системой работает."
+        threading.Thread(
+            target=self._dial_numbers,
+            args=(addon, numbers, message, language,
+                  int(alarm.get("ring_timeout") or 15), int(alarm.get("sip_account") or 1)),
+            daemon=True,
+        ).start()
+        return {"ok": True, "numbers": len(numbers), "addon": addon}
+
+    # ---------------- переобучение ----------------
+
+    def retrain_async(self, kind: str, subject: str | None = None) -> bool:
+        """Запуск переобучения в фоне (поток). False — уже идёт."""
+        if self.retrain_status.get("running"):
+            return False
+        self.retrain_status = {"running": True, "kind": kind,
+                               "subject": subject or "*", "started": time.time()}
+        threading.Thread(target=self._retrain_thread, args=(kind, subject),
+                         daemon=True, name="sa-retrain").start()
+        return True
+
+    def _retrain_thread(self, kind: str, subject: str | None) -> None:
+        try:
+            res = self.retrain(kind, subject)
+            self.retrain_status.update({"running": False, "finished": time.time(), "last": res})
+        except Exception as exc:  # noqa: BLE001
+            LOG.exception("Переобучение упало: %s", exc)
+            self.retrain_status.update({"running": False, "finished": time.time(),
+                                        "last": {"ok": False, "error": str(exc)}})
+
+    def retrain(self, kind: str, subject: str | None = None) -> dict[str, Any]:
+        """Пересчёт эмбеддингов по сохранённым фото (/media/smart_access/...).
+
+        После удаления ошибочных фото и/или при обновлении моделей база
+        прототипов пересобирается с нуля по фактическим файлам.
+        """
+        if kind not in ("car", "face"):
+            return {"ok": False, "error": "kind must be car|face"}
+        photos_map = self.store.all_photos(kind)
+        if subject:
+            photos_map = {subject: photos_map.get(subject, [])}
+        results: dict[str, Any] = {}
+        for subj, files in photos_map.items():
+            embeds: list[list[float]] = []
+            for path in files:
+                try:
+                    with open(path, "rb") as fh:
+                        jpg = fh.read()
+                except OSError:
+                    continue
+                if kind == "car":
+                    embs = self.models.car_embedding(jpg, with_views=True)
+                    if embs is not None:
+                        embeds.extend([list(map(float, v)) for v in embs])
+                else:
+                    aligned, _w, _h = self.models.detect_face_raw(jpg)
+                    if aligned is None:
+                        continue
+                    import cv2 as _cv2
+                    ok, buf = _cv2.imencode(".jpg", aligned)
+                    if not ok:
+                        continue
+                    emb = self.models.face_embedding_of_aligned(buf.tobytes())
+                    if emb is not None:
+                        embeds.append([float(x) for x in emb])
+            self.store.replace_subject(kind, subj, embeds)
+            results[subj] = len(embeds)
+        LOG.info("Переобучение %s завершено: %s", kind, results)
+        self._log_event(kind, "retrain", "retrained",
+                        ", ".join(f"{k}: +{v}" for k, v in results.items()), 0)
+        self.publish_status()
+        return {"ok": True, "results": results}
 
     # ---------------- enrollment ----------------
 
@@ -379,6 +555,17 @@ class Brain:
         if cmd == "reload":
             cfg.reload_conf()
             self.publish_status()
+        elif cmd == "retrain":
+            kind = str(data.get("kind") or "face")
+            subj = str(data.get("subject") or "").strip() or None
+            if kind not in ("car", "face"):
+                self._ack({"cmd": "retrain", "ok": False, "error": "kind must be car|face"})
+                return
+            if not self.retrain_async(kind, subj):
+                self._ack({"cmd": "retrain", "ok": False, "error": "переобучение уже идёт"})
+                return
+            self._ack({"cmd": "retrain", "ok": True, "started": True,
+                       "kind": kind, "subject": subj or "*"})
         elif cmd == "identify":
             entity = str(data.get("entity_id") or "")
             kind = str(data.get("kind") or "car")
@@ -460,5 +647,13 @@ class Brain:
             "cars": list(self.store.cars.keys()),
             "faces": list(self.store.faces.keys()),
             "last_grant": self.stats["last_grant"],
+            "gestures": {
+                "enabled": bool((cfg.CONF.gestures or {}).get("enabled")),
+                "model_ok": self.models.gestures_ok,
+            },
+            "alarm": {
+                "enabled": bool((cfg.CONF.alarm or {}).get("enabled")),
+                "numbers": len([n for n in str((cfg.CONF.alarm or {}).get("numbers") or "").splitlines() if n.strip()]),
+            },
         }
         self.client.publish("smart_access/status", json.dumps(payload, ensure_ascii=False), retain=True)

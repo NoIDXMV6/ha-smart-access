@@ -70,6 +70,25 @@ def _read_options() -> dict[str, Any]:
             "mode": "gray_zone",
             "timeout_sec": 6,
         },
+        # Жесты: подтверждение открытия (одна рука вверх) и тревога (обе руки).
+        # Требуют модель /models/yolov8n-pose.onnx (вшита в образ).
+        "gestures": {
+            "enabled": False,
+            "min_frames": 1,
+        },
+        # Тревога (насильственное открытие под угрозой): звонок через ha-sip
+        # с текстом (Piper озвучивает TTS-движком HA). numbers — по одному
+        # номеру в строке, например 'sip:89256758881@pbx.kozhevatov.ru'.
+        "alarm": {
+            "enabled": False,
+            "addon": "c7744bff_ha-sip",
+            "numbers": "",
+            "sip_account": 1,
+            "ring_timeout": 15,
+            "language": "ru",
+            "message_template": "Тревога! {time}, {name} открыл калитку с тревожным жестом.",
+            "notify": True,
+        },
     }
     try:
         with open("/data/options.json", "r", encoding="utf-8") as fh:
@@ -164,6 +183,22 @@ class Config:
         self.cameras: list[dict[str, Any]] = cams
         self.recognition: dict[str, Any] = opts["recognition"]
         self.vlm: dict[str, Any] = opts["vlm"]
+        self.gestures: dict[str, Any] = opts.get("gestures") or {"enabled": False, "min_frames": 1}
+        self.alarm: dict[str, Any] = opts.get("alarm") or {}
+
+        # /data/settings.json — переключатели из панели (переживают
+        # перенастройку аддона, как master.json). Не None -> переопределяем.
+        try:
+            sp = os.path.join(DATA_DIR, "settings.json")
+            if os.path.exists(sp):
+                with open(sp, "r", encoding="utf-8") as fh:
+                    s = json.load(fh)
+                if isinstance(s.get("gestures_enabled"), bool):
+                    self.gestures["enabled"] = s["gestures_enabled"]
+                if isinstance(s.get("alarm_enabled"), bool):
+                    self.alarm["enabled"] = s["alarm_enabled"]
+        except Exception as exc:  # noqa: BLE001
+            LOG.debug("settings.json не прочитан: %s", exc)
 
         # MQTT: если в опциях пусто или указан localhost (а наш аддон работает
         # в host_network), берём адрес/креды брокера у Supervisor (сервис mqtt:want).
@@ -223,6 +258,8 @@ class Config:
             "cameras": self.cameras,
             "recognition": self.recognition,
             "vlm": vlm,
+            "gestures": self.gestures,
+            "alarm": {**self.alarm, "numbers": self.alarm.get("numbers") or ""},
         }
 
 

@@ -176,6 +176,8 @@ async def main() -> None:
             "models": models_.status,
             "frigate": probe["ok"],
             "frigate_url": conf.frigate_url,
+            "frigate_version": probe.get("version"),
+            "frigate_detected_url": probe.get("detected_url"),
             "frigate_error": probe["error"],
             "mqtt_host": conf.mqtt.get("host") or "core-mosquitto",
             "bridge": {

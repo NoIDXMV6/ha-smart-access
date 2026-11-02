@@ -1,6 +1,6 @@
 {
   "name": "Smart Access Core",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "slug": "smart-access-core",
   "description": "Умный допуск на одной VM с HAOS: авто-открытие шлагбаумов по своим машинам и калитки по лицам. LLM — только внешний URL+token+модель (опционально).",
   "url": "https://github.com/NoIDXMV6/ha-smart-access",
@@ -32,7 +32,7 @@
   "map": ["media:rw", "share:rw"],
   "options": {
     "master_enable": true,
-    "frigate_url": "http://127.0.0.1:5000",
+    "frigate_url": "http://127.0.0.1:8971",
     "mqtt": {
       "host": "",
       "port": 1883,

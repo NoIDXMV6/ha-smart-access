@@ -19,7 +19,7 @@ def _read_options() -> dict[str, Any]:
     """Читает /data/options.json (аддон-UI) с безопасными дефолтами."""
     defaults: dict[str, Any] = {
         "master_enable": True,
-        "frigate_url": "http://127.0.0.1:5000",
+        "frigate_url": "http://127.0.0.1:8971",
         "mqtt": {"host": "", "port": 1883, "user": "", "password": ""},
         "cameras": [],
         "recognition": {

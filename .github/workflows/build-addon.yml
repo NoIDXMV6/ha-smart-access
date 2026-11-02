@@ -1,0 +1,73 @@
+name: Build Smart Access Core addon image
+
+# Собирает Docker-образ аддона и публикует в GHCR. Supervisor на HAOS
+# скачивает готовый образ (с прогрессом в UI), а не собирает его на месте.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "smart-access-core/**"
+      - ".github/workflows/build-addon.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_BASE: ghcr.io/noidxmv6/smart-access-core
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, aarch64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download ML models (release models-v1)
+        run: |
+          mkdir -p smart-access-core/models
+          gh release download models-v1 \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "*.onnx" \
+            --dir smart-access-core/models
+          ls -la smart-access-core/models
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Read addon version
+        id: ver
+        run: |
+          echo "version=$(python3 -c "import json; print(json.load(open('smart-access-core/config.json'))['version'])")" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.arch }}
+        uses: docker/build-push-action@v6
+        with:
+          context: smart-access-core
+          platforms: ${{ matrix.arch == 'amd64' && 'linux/amd64' || 'linux/arm64' }}
+          build-args: |
+            BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base-debian:bookworm
+          push: true
+          tags: |
+            ${{ env.IMAGE_BASE }}-${{ matrix.arch }}:${{ steps.ver.outputs.version }}
+            ${{ env.IMAGE_BASE }}-${{ matrix.arch }}:latest
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}

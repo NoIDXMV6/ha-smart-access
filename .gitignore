@@ -4,3 +4,6 @@ __pycache__/
 recognizer/data/
 *.log
 .venv/
+# ML-модели не в git: раздаются через GitHub Release models-v1,
+# в образ вшивает CI (скачивание на HA — докачает run.sh)
+smart-access-core/models/*.onnx

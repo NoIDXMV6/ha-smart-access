@@ -3,11 +3,11 @@ FROM $BUILD_FROM
 
 ENV LANG C.UTF-8
 
-# ffmpeg нужен Frigate'у НЕ отсюда (он в своём аддоне); здесь он используется
-# только как утилита проверки MJPEG-моста и опционального WSS→MJPEG фолбэка.
+# ffmpeg здесь НЕ нужен: Frigate берёт его из своего аддона, а код Smart Access
+# работает без него (MJPEG-мост и модели — чистый python/opencv).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      python3 python3-pip python3-setuptools ffmpeg curl ca-certificates \
+      python3 python3-pip python3-setuptools curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --no-cache-dir --break-system-packages \
@@ -19,8 +19,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
       Pillow==10.4.0 \
       requests==2.32.3
 
-# Модели бандлятся в репозиторий (офлайн-надёжность). Если по какой-то причине
-# их нет — докачаются при первом запуске (run.sh).
+# Модели вшиты в образ при сборке в CI (скачиваются из GitHub Release models-v1).
+# Если по какой-то причине их нет — докачаются при первом запуске (run.sh).
 COPY models /models
 RUN ls -la /models
 

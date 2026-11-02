@@ -78,7 +78,9 @@ def build_frigate_config(conf, bridge) -> str:
         lines.append(f"  user: {mqtt_user}")
         if mqtt_pass:
             lines.append(f"  password: {mqtt_pass}")
-        lines.append("# креды подставлены автоматически (Supervisor) — не публикуйте конфиг целиком")
+            lines.append("# креды подставлены автоматически — не публикуйте конфиг целиком")
+        else:
+            lines.append(f"  # пароль пользователя {mqtt_user} не задан в настройках Smart Access — впишите его сюда")
     lines.append("")
     lines.append("detectors:")
     lines.append("  cpu:")
@@ -97,8 +99,13 @@ def build_frigate_config(conf, bridge) -> str:
     lines.append("cameras:")
     for c in cams:
         name = c["name"]
+        disp = str(c.get("display_name") or "").strip()
         rtsp = (c.get("rtsp_url") or "").strip()
-        lines.append(f"  {name}:")
+        if disp and disp != name:
+            # исходное имя видно в панели/конфиге: «Пруд» -> prud
+            lines.append(f"  {name}:  # «{disp}»")
+        else:
+            lines.append(f"  {name}:")
         lines.append("    ffmpeg:")
         lines.append("      inputs:")
         if rtsp:
@@ -205,6 +212,7 @@ async def main() -> None:
             "bridge": {
                 c["name"]: {
                     "entity": c.get("ha_entity"),
+                    "display": c.get("display_name") or "",
                     "direct": bool((c.get("rtsp_url") or "").strip()),
                     "url": (c.get("rtsp_url") or "").strip() or bridge.frigate_url(c["name"]),
                     "failures": bridge.failures.get(c["name"], 0),
@@ -293,13 +301,6 @@ async def main() -> None:
     if UI_DIR.exists():
         app.router.add_static("/ui/", UI_DIR)
 
-    # ---------------- MJPEG-порт 8100 ----------------
-    # v1.1.10 и раньше сайт на 8100 НЕ поднимался вовсе: маршруты /mjpeg/*
-    # были зарегистрированы, а слушали только :8099 — Frigate получал
-    # «Connection to tcp://172.30.32.1:8100 refused» и ffmpeg-цикл падал.
-    await start_bridge_site(runner)
-    LOG.info("Smart Access Core запущен: UI на :8099, MJPEG-мост на :8100")
-
     # ---------------- сигналы ----------------
 
     def request_reload(_sig, _frm):  # noqa: ANN001
@@ -313,6 +314,15 @@ async def main() -> None:
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8099)
     await site.start()
+
+    # ---------------- MJPEG-порт 8100 ----------------
+    # v1.1.10 и раньше сайт на 8100 НЕ поднимался вовсе: маршруты /mjpeg/*
+    # были зарегистрированы, а слушали только :8099 — Frigate получал
+    # «Connection to tcp://172.30.32.1:8100 refused» и ffmpeg-цикл падал.
+    # ВАЖНО: только ПОСЛЕ runner.setup() — в 1.1.11 вызов стоял до создания
+    # runner (UnboundLocalError, аддон не стартовал).
+    await start_bridge_site(runner)
+    LOG.info("Smart Access Core запущен: UI на :8099, MJPEG-мост на :8100")
     brain.publish_status()
 
     while True:

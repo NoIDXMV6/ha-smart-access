@@ -157,6 +157,7 @@ class Config:
             cc = dict(c)
             cc["name"] = slug
             if orig and slug != orig:
+                cc["display_name"] = orig  # исходное имя для подписи в конфиге/UI
                 LOG.warning("Имя камеры «%s» нормализовано в «%s» (формат Frigate: [a-z0-9_])",
                             orig, slug)
             cams.append(cc)
@@ -169,20 +170,31 @@ class Config:
         # Имя core-mosquitto из host_network не резолвится — слушаем
         # опубликованный на хосте порт по 127.0.0.1.
         host = str(self.mqtt.get("host") or "").strip()
+        user_opt = str(self.mqtt.get("user") or "").strip()
+        pass_opt = str(self.mqtt.get("password") or "")
         if host in ("", "localhost", "127.0.0.1", "::1"):
-            svc = discover_mqtt_service()
-            if svc:
-                self.mqtt = {
-                    **self.mqtt,
-                    "host": "127.0.0.1",
-                    "port": svc.get("port") or self.mqtt.get("port") or 1883,
-                    "user": self.mqtt.get("user") or svc.get("user") or "",
-                    "password": self.mqtt.get("password") or svc.get("password") or "",
-                }
-                LOG.info("MQTT: брокер обнаружен через Supervisor: 127.0.0.1:%s (user=%s)",
-                         self.mqtt["port"], self.mqtt["user"] or "-")
-            elif host in ("", "localhost"):
+            if user_opt and pass_opt:
+                # полная пара пользователя — используем как есть
                 self.mqtt = {**self.mqtt, "host": "127.0.0.1"}
+                LOG.info("MQTT: креды из опций (user=%s)", user_opt)
+            else:
+                svc = discover_mqtt_service()
+                if svc:
+                    # НЕ смешиваем: неполная пара из опций (например user «mqtt»
+                    # без пароля) + пароль Supervisor — несовпадающая пара,
+                    # у Frigate с ней «MQTT Not authorized». Пара берётся
+                    # ЦЕЛИКОМ из одного источника.
+                    self.mqtt = {
+                        **self.mqtt,
+                        "host": "127.0.0.1",
+                        "port": svc.get("port") or self.mqtt.get("port") or 1883,
+                        "user": svc.get("user") or "",
+                        "password": svc.get("password") or "",
+                    }
+                    LOG.info("MQTT: брокер обнаружен через Supervisor: 127.0.0.1:%s (user=%s)",
+                             self.mqtt["port"], self.mqtt["user"] or "-")
+                elif host in ("", "localhost"):
+                    self.mqtt = {**self.mqtt, "host": "127.0.0.1"}
 
     def camera_by_name(self, name: str) -> dict[str, Any] | None:
         for cam in self.cameras:

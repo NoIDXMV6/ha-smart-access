@@ -59,22 +59,134 @@ def call_ha_service(domain: str, service: str, data: dict[str, Any] | None = Non
     return False
 
 
-def get_camera_image(entity_id: str) -> bytes | None:
-    """JPEG-кадр с камеры HA (camera_proxy — работает и для облачных камер)."""
-    if not cfg.SUPERVISOR_TOKEN:
+def _short_exc(exc: BaseException, limit: int = 120) -> str:
+    """Короткое человекочитаемое описание исключения для журнала."""
+    s = str(exc).strip()
+    return (s[:limit] + "…") if len(s) > limit else (s or exc.__class__.__name__)
+
+
+def _first_jpeg(buf: bytes) -> bytes | None:
+    """Первый ПОЛНЫЙ JPEG (маркеры SOI…EOI) в буфере; None, если он ещё не целиком.
+
+    В MJPEG-потоках энтропийные данные не содержат 0xFFD9 (байтовое
+   Stuffing), поэтому поиск EOI после SOI даёт ровно границы кадра.
+    """
+    soi = buf.find(b"\xff\xd8\xff")
+    if soi < 0:
         return None
+    eoi = buf.find(b"\xff\xd9", soi + 3)
+    if eoi < 0:
+        return None
+    return buf[soi:eoi + 2]
+
+
+# Троттлинг WARNING о сбоях камер. Раньше причины писались на DEBUG и в
+# журнал не попадали: панель показывала «сбоев: 440», а ПОЧЕМУ — не говорил
+# никто (реальный случай: camera.kalitka — универсальная камера с RTSP без
+# still_image_url, у которой одиночные снимки не работают в принципе).
+_WARN_TS: dict[str, float] = {}
+
+
+def _warn_throttled(entity_id: str, msg: str, every: float = 60.0,
+                    once: bool = False) -> None:
+    key = f"{entity_id}|{'once' if once else 'each'}|{msg[:60]}"
+    now = time.time()
+    if once:
+        if _WARN_TS.get(key):
+            return
+        _WARN_TS[key] = now
+    else:
+        if now - _WARN_TS.get(key, 0.0) < every:
+            return
+        _WARN_TS[key] = now
+    LOG.warning("Камера %s: %s", entity_id, msg)
+
+
+def get_camera_stream_frame(entity_id: str, timeout: float = 12.0,
+                            max_bytes: int = 4_000_000) -> tuple[bytes | None, str]:
+    """Один кадр из MJPEG-потока HA (/core/api/camera_proxy_stream/<entity>).
+
+    Запасной путь для камер-«потоков». Универсальная камера (Generic Camera)
+    с RTSP и без «URL кадра» (still_image_url) часто НЕ отдаёт одиночный
+    снимок: HA ради одного кадра запускает извлечение кадра из потока
+    (ffmpeg + HLS), это медленно и не укладывается в таймаут, а НЕПРЕРЫВНЫЙ
+    MJPEG при этом работает — именно по нему играет карточка в HA. Читаем
+    ПЕРВЫЙ полный JPEG (SOI…EOI) и закрываем соединение.
+    Возвращает (jpeg|None, причина_отказа). Никогда не бросает.
+    """
+    if not cfg.SUPERVISOR_TOKEN:
+        return None, "нет SUPERVISOR_TOKEN"
+    deadline = time.monotonic() + timeout
+    try:
+        resp = requests.get(
+            f"{cfg.supervisor_base()}/core/api/camera_proxy_stream/{entity_id}",
+            headers=_headers(), timeout=(5, 5), stream=True,
+        )
+    except requests.RequestException as exc:
+        return None, f"поток HA недоступен: {_short_exc(exc)}"
+    if not resp.ok:
+        ctype = resp.headers.get("content-type", "?")
+        resp.close()
+        return None, f"поток HA: HTTP {resp.status_code} ({ctype})"
+    buf = b""
+    try:
+        for chunk in resp.iter_content(chunk_size=65536):
+            if chunk:
+                buf += chunk
+                jpg = _first_jpeg(buf)
+                if jpg is not None:
+                    return jpg, ""
+                if len(buf) > max_bytes:
+                    return None, "поток HA не отдал JPEG (нет маркеров SOI/EOI)"
+            if time.monotonic() > deadline:
+                break
+    except requests.RequestException as exc:
+        return None, f"поток HA прервался: {_short_exc(exc)}"
+    finally:
+        resp.close()
+    return None, "таймаут ожидания кадра из потока HA"
+
+
+def get_camera_image_ex(entity_id: str, timeout: int = 12) -> tuple[bytes | None, str, str]:
+    """Кадр камеры HA с запасным путём: (jpeg, источник, причина_отказа).
+
+    источник: 'proxy' — одиночный снимок camera_proxy (обычный путь);
+              'stream' — первый кадр из MJPEG-потока HA (запасной путь);
+              '' — кадра нет.
+    Никогда не бросает исключений. Причины отказов пишутся в журнал
+    (WARNING с троттлингом 60 с на камеру/причину).
+    """
+    if not cfg.SUPERVISOR_TOKEN:
+        return None, "", "нет SUPERVISOR_TOKEN"
     try:
         resp = requests.get(
             f"{cfg.supervisor_base()}/core/api/camera_proxy/{entity_id}",
             headers=_headers(),
-            timeout=12,
+            timeout=timeout,
         )
         if resp.ok and resp.content[:3] == b"\xff\xd8\xff":
-            return resp.content
-        LOG.debug("camera_proxy %s -> %s", entity_id, resp.status_code)
+            return resp.content, "proxy", ""
+        err = (f"camera_proxy HTTP {resp.status_code} "
+               f"({resp.headers.get('content-type', '?')})")
+        if not resp.ok and resp.content:
+            err += f": {resp.content[:120]!r}"
+        elif resp.ok:
+            err += ": тело не JPEG"
     except requests.RequestException as exc:
-        LOG.debug("camera_proxy %s недоступна: %s", entity_id, exc)
-    return None
+        err = f"camera_proxy недоступна: {_short_exc(exc)}"
+    _warn_throttled(entity_id, err)
+    jpg, err2 = get_camera_stream_frame(entity_id)
+    if jpg is not None:
+        _warn_throttled(entity_id,
+                        f"одиночный снимок не работает ({err}); кадр взят из потока HA",
+                        once=True)
+        return jpg, "stream", ""
+    return None, "", f"{err}; {err2}"
+
+
+def get_camera_image(entity_id: str) -> bytes | None:
+    """JPEG-кадр с камеры HA (совместимость: только jpeg|None)."""
+    return get_camera_image_ex(entity_id)[0]
 
 
 def get_ha_state(entity_id: str) -> dict[str, Any] | None:

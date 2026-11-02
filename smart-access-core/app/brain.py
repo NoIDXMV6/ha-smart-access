@@ -569,7 +569,10 @@ class Brain:
         elif cmd == "identify":
             entity = str(data.get("entity_id") or "")
             kind = str(data.get("kind") or "car")
-            jpg = ha_api.get_camera_image(entity)
+            # v1.2.1: с запасным путём — для камер без рабочих одиночных
+            # снимков (универсальная RTSP-камера калитки) кадр берётся
+            # из потока HA, иначе кнопка «Обучить» отвечает «кадр недоступен»
+            jpg = ha_api.get_camera_image_ex(entity)[0]
             if not jpg:
                 self._ack({"cmd": "identify", "ok": False, "error": "кадр недоступен"})
                 return

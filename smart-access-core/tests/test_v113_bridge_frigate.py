@@ -123,12 +123,13 @@ def test_bridge_polls_cameras_in_parallel(monkeypatch):
     """3 медленные камеры: у КАЖДОЙ свой fps, а не 1/(сумма задержек)."""
 
     async def run() -> dict[str, int]:
-        def fake_get(entity: str) -> bytes:
-            # как настоящий get_camera_image: БЛОКИРУЮЩИЙ вызов в executor-потоке
+        def fake_get(entity: str) -> tuple[bytes, str, str]:
+            # как настоящий get_camera_image_ex: БЛОКИРУЮЩИЙ вызов в
+            # executor-потоке, кортеж (jpeg, источник, ошибка)
             time.sleep(0.8)
-            return b"\xff\xd8\xff\x00"
+            return (b"\xff\xd8\xff\x00", "proxy", "")
 
-        monkeypatch.setattr(ha_api, "get_camera_image", fake_get)
+        monkeypatch.setattr(ha_api, "get_camera_image_ex", fake_get)
         b = Bridge(fps=1.5)
         b.set_cameras([
             {"name": "prud", "ha_entity": "camera.prud"},

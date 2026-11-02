@@ -125,6 +125,10 @@ async def main() -> None:
                     "clients": bridge.clients.get(c["name"], 0),
                     "fps": bridge.fps.get(c["name"], 0.0),
                     "frames": bridge.frames.get(c["name"], 0),
+                    # v1.2.1: КАК получен кадр, ПОЧЕМУ его нет и что делать
+                    "source": bridge.source.get(c["name"], ""),
+                    "error": bridge.last_error.get(c["name"], ""),
+                    "hint": bridge.hint(c["name"]),
                 }
                 for c in conf.cameras
             },

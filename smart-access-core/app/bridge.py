@@ -63,6 +63,17 @@ class Bridge:
         self.fps: dict[str, float] = {}          # name -> EMA кадров/с
         self.last_frame_ts: dict[str, float] = {}  # name -> время последнего кадра
         self.frames: dict[str, int] = {}         # name -> всего получено кадров
+        # v1.2.1: КАК получен кадр и ПОЧЕМУ его нет — видны в панели
+        self.source: dict[str, str] = {}         # 'proxy' | 'stream' | ''
+        self.last_error: dict[str, str] = {}     # последняя причина «сбоев»
+        # v1.2.1: опрос без наложений и с бэкоффом при стойких сбоях.
+        # Раньше камера с вечно таймаутящим снимком (калитка: camera_proxy
+        # универсальной камеры не работает в принципе) тянулась каждые
+        # 0.67 c по 12 c, заставляя HA раз за разом запускать извлечение
+        # кадра из потока, а тик цикла жил столько же, сколько самый
+        # медленный опрос — соседние камеры недополучали кадры.
+        self._busy: set[str] = set()             # опрос которых сейчас идёт
+        self._next_try: dict[str, float] = {}    # не раньше какого времени опрашивать
 
     def set_cameras(self, cams: list[dict]) -> None:
         """Список из конфига: [{'name', 'ha_entity'}, ...] (перезаписывает карту)."""
@@ -72,6 +83,8 @@ class Bridge:
             self.failures.setdefault(name, 0)
             self.fps.setdefault(name, 0.0)
             self.frames.setdefault(name, 0)
+            self.source.setdefault(name, "")
+            self.last_error.setdefault(name, "")
         for gone in list(self.fps):
             if gone not in self.entities:
                 self.fps.pop(gone, None)
@@ -79,6 +92,9 @@ class Bridge:
                 self.frames.pop(gone, None)
                 self.failures.pop(gone, None)
                 self.latest.pop(gone, None)
+                self.source.pop(gone, None)
+                self.last_error.pop(gone, None)
+                self._next_try.pop(gone, None)
 
     def url(self, name: str) -> str:
         return f"http://127.0.0.1:8100/mjpeg/{name}"
@@ -113,14 +129,23 @@ class Bridge:
 
     async def _fetch_one(self, loop: asyncio.AbstractEventLoop,
                          name: str, entity: str) -> None:
-        """Один опрос камеры + телеметрия. Не бросает исключений."""
+        """Один опрос камеры + телеметрия. Не бросает исключений.
+
+        v1.2.1: get_camera_image_ex — с запасным путём «первый кадр из
+        потока HA» для камер без рабочих одиночных снимков (универсальная
+        камера с RTSP без still_image_url) и с внятной причиной сбоя в журнале.
+        """
         try:
-            jpeg = await loop.run_in_executor(None, ha_api.get_camera_image, entity)
+            jpeg, source, err = await loop.run_in_executor(
+                None, ha_api.get_camera_image_ex, entity)
         except Exception:  # noqa: BLE001
-            jpeg = None
+            jpeg, source, err = None, "", "опрос упал"
         if jpeg:
             self.latest[name] = jpeg
             self.failures[name] = 0
+            self.source[name] = source
+            self.last_error[name] = ""
+            self._next_try[name] = 0.0
             now = time.time()
             prev = self.last_frame_ts.get(name)
             self.last_frame_ts[name] = now
@@ -132,10 +157,15 @@ class Bridge:
                 self.fps[name] = round(0.7 * self.fps.get(name, inst) + 0.3 * inst, 2)
         else:
             self.failures[name] = self.failures.get(name, 0) + 1
-            # после 5 неудач подряд — отдаём заглушку и логируем редко
+            self.source[name] = ""
+            self.last_error[name] = err or "нет кадра"
+            # Бэкофф: 0.67 c → 1.3 → 2.7 → 5 c (кап), чтобы не долбить HA
+            # извлечением кадра из потока каждые 0.67 c при стойком сбое
+            backoff = min(5.0, self.interval * (2 ** min(max(self.failures[name] - 1, 0), 4)))
+            self._next_try[name] = time.time() + backoff
             if self.failures[name] in (1, 30, 300):
-                LOG.warning("Мост: камера %s (%s) не отвечает (%s подряд)",
-                            name, entity, self.failures[name])
+                LOG.warning("Мост: камера %s (%s) не отвечает — %s (%s подряд)",
+                            name, entity, self.last_error[name], self.failures[name])
 
     def _kick(self, name: str, entity: str) -> None:
         """Фоновый внеочередной опрос одной камеры (не ждёт ближайшего тика)."""
@@ -143,24 +173,53 @@ class Bridge:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        task = loop.create_task(self._fetch_one(loop, name, entity))
+        if name in self._busy:
+            return  # опрос уже идёт — дубликат не нужен
+        self._busy.add(name)
+        task = loop.create_task(self._guarded_fetch(loop, name, entity))
         self._bg.add(task)
         task.add_done_callback(self._bg.discard)
 
+    async def _guarded_fetch(self, loop: asyncio.AbstractEventLoop,
+                             name: str, entity: str) -> None:
+        """Опрос с освобождением слота _busy в любом исходе."""
+        try:
+            await self._fetch_one(loop, name, entity)
+        finally:
+            self._busy.discard(name)
+
     async def _tick(self, loop: asyncio.AbstractEventLoop) -> None:
         # v1.1.13: камеры с подписчиками опрашиваются ПАРАЛЛЕЛЬНО.
-        # Раньше опрос шёл последовательно: пока тянется медленный облачный
-        # снимок одной камеры (до 12 с), остальные ждут, и с ростом числа
-        # камер реальный fps каждой падал до долей кадра в секунду
-        # (замер на стенде: 3 камеры с задержками 1.0/0.5/0.9 с — реальный
-        # fps prud 0.3 при отдаче клиенту 1.5 fps).
-        pending = [
-            self._fetch_one(loop, name, entity)
-            for name, entity in self.entities.items()
-            if self.clients.get(name, 0) > 0
-        ]
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        # v1.2.1: опросы уходят в фон без ожидания самого медленного —
+        # застрявшая камера (12-секундный таймаут снимка) больше не тормозит
+        # тики соседних; наложений нет (_busy), стойкие сбои — с бэкоффом.
+        now = time.time()
+        for name, entity in self.entities.items():
+            if self.clients.get(name, 0) <= 0:
+                continue
+            if name in self._busy or now < self._next_try.get(name, 0.0):
+                continue
+            self._busy.add(name)
+            task = loop.create_task(self._guarded_fetch(loop, name, entity))
+            self._bg.add(task)
+            task.add_done_callback(self._bg.discard)
+
+    def hint(self, name: str) -> str:
+        """Подсказка для панели, когда мост не может нормально получить кадры."""
+        failures = self.failures.get(name, 0)
+        if self.source.get(name) == "stream" and failures == 0:
+            return ("Кадры идут запасным путём — из потока HA (медленно): одиночные "
+                    "снимки camera_proxy для этой камеры не работают. Обычно так себя "
+                    "ведёт универсальная камера (Generic Camera) с RTSP без «URL кадра». "
+                    "Для полной скорости задайте камере rtsp_url (Frigate читает её "
+                    "напрямую) или добавьте камере в HA still_image_url.")
+        if failures >= 30:
+            return (f"camera_proxy не отвечает постоянно ({self.last_error.get(name, '')}). "
+                    "Локальная RTSP-камера → впишите rtsp_url в настройках этой камеры "
+                    "(лучший путь, мост не нужен). Универсальная камера без still_image_url "
+                    "→ добавьте ей «URL кадра» (например http://admin:пароль@IP/"
+                    "ISAPI/Streaming/channels/101/picture у Hikvision).")
+        return ""
 
     # ---------- aiohttp ----------
 

@@ -224,8 +224,14 @@ async function refresh() {
     $('state').className = 'state ' + st.state;
     $('masterBtn').textContent = st.master_enable ? 'Авто-допуск: ВКЛ' : 'Авто-допуск: ВЫКЛ';
     $('masterBtn').className = st.master_enable ? 'green' : 'orange';
-    const rows = Object.entries(st.bridge||{}).map(([n,c]) =>
-      `<tr><td><b>${n}</b>${c.display&&c.display!==n?` <span class="muted">(${esc(c.display)})</span>`:''}</td><td>${esc(c.entity)}</td><td><span class="pill ${c.failures>5?'err':'ok'}">сбоев: ${c.failures}</span>${c.direct?'':` <span class="pill ${c.fps>0?'ok':''}">fps: ${c.fps||0}</span>`}</td><td>${c.direct?'<b>прямой RTSP</b> (без моста)':esc(c.url)}</td></tr>`).join('');
+    const rows = Object.entries(st.bridge||{}).map(([n,c]) => {
+      // v1.2.1: источник кадра + строка-подсказка, когда мост не получает кадры
+      const src = c.source === 'stream' ? ' <span class="pill warn">кадр из потока HA</span>' : '';
+      const hint = c.hint
+        ? `<tr><td colspan="4"><div class="frigate-warn">⚠ ${esc(c.hint)}${c.error?` <span class="muted">Последняя ошибка: ${esc(c.error)}</span>`:''}</div></td></tr>`
+        : '';
+      return `<tr><td><b>${n}</b>${c.display&&c.display!==n?` <span class="muted">(${esc(c.display)})</span>`:''}</td><td>${esc(c.entity)}</td><td><span class="pill ${c.failures>5?'err':'ok'}">сбоев: ${c.failures}</span>${c.direct?'':` <span class="pill ${c.fps>0?'ok':''}">fps: ${c.fps||0}</span>`}${src}</td><td>${c.direct?'<b>прямой RTSP</b> (без моста)':esc(c.url)}</td></tr>${hint}`;
+    }).join('');
     const re = st.retrain || {};
     const reHtml = re.running
       ? `<span class="pill warn">переобучение идёт: ${esc(re.kind)} ${esc(re.subject||'')}</span>`

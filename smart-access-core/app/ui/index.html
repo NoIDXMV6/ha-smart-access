@@ -113,7 +113,10 @@ async function refresh() {
        &nbsp; Frigate: ${st.frigate?'<span class="pill ok">связь есть'+(st.frigate_version?` · v${esc(st.frigate_version)}`:'')+'</span>':'<span class="pill err">нет связи</span>'}
        &nbsp; MQTT: ${esc(st.mqtt_host)} ${(st.stats&&st.stats.mqtt==='ok')?'<span class="pill ok">подключено</span>':(st.stats&&st.stats.mqtt?`<span class="pill err">${esc(st.stats.mqtt)}</span>`:'')}
        &nbsp; Событий: ${st.stats.events_seen}, допусков: ${st.stats.grants}, отказов: ${st.stats.denied}, VLM: ${st.stats.vlm_calls}</p>`
-       + (st.frigate_error ? `<p class="frigate-warn">⚠ ${esc(st.frigate_error)}</p>` : '');
+       + (st.frigate_error ? `<p class="frigate-warn">⚠ ${esc(st.frigate_error)}</p>` : '')
+       + (!st.frigate && st.frigate_addon_log
+          ? `<details class="frigate-warn"><summary style="cursor:pointer;font-weight:600">Журнал аддона Frigate (последние строки — причина в конце)</summary><pre style="white-space:pre-wrap;margin:8px 0 0;font-size:11px;max-height:240px;overflow:auto">${esc(st.frigate_addon_log)}</pre></details>`
+          : '');
   } catch(e) { $('status').textContent = 'ошибка загрузки статуса: ' + (e && e.message ? e.message : e); }
   try {
     const s = await (await fetch(API('api/subjects'))).json();

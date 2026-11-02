@@ -161,6 +161,8 @@ async def main() -> None:
     # кэш проверки Frigate: не блокируем event loop синхронным requests
     # и не долбим Frigate на каждый опрос UI (обновление кэша 10 с)
     probe_cache: dict = {"ts": 0.0, "res": {"ok": False, "error": "ещё не проверялся"}}
+    # хвост журнала аддона Frigate (только когда связи нет, кэш 60 с)
+    addon_log_cache: dict = {"ts": 0.0, "res": None}
 
     async def handle_status(_req: web.Request) -> web.Response:
         conf = cfg.CONF
@@ -170,6 +172,15 @@ async def main() -> None:
             )
             probe_cache["ts"] = time.time()
         probe = probe_cache["res"]
+        addon_log = None
+        if not probe["ok"]:
+            # журнал аддона Frigate прямо в панели — без ручного копирования логов
+            if time.time() - addon_log_cache["ts"] > 60:
+                addon_log_cache["res"] = await loop.run_in_executor(
+                    None, ha_api.frigate_addon_log_tail
+                )
+                addon_log_cache["ts"] = time.time()
+            addon_log = addon_log_cache["res"]
         return web.json_response({
             "state": "ok" if (conf.master_enable and (models_.ok or models_.faces_ok)) else "degraded",
             "master_enable": conf.master_enable,
@@ -179,6 +190,7 @@ async def main() -> None:
             "frigate_version": probe.get("version"),
             "frigate_detected_url": probe.get("detected_url"),
             "frigate_error": probe["error"],
+            "frigate_addon_log": addon_log,
             "mqtt_host": conf.mqtt.get("host") or "core-mosquitto",
             "bridge": {
                 c["name"]: {

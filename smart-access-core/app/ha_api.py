@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import os
+import re
 import socket
 import struct
 import time
@@ -92,31 +94,71 @@ def get_ha_state(entity_id: str) -> dict[str, Any] | None:
 
 # ---------------- Frigate ----------------
 
-# Типовые порты, где Frigate может отвечать HTTP API, если настроенный
-# frigate_url не работает: 8971 — ВНЕШНИЙ порт аддона Frigate 0.14+ (панель
-# «Конфигурация прослушиваемых портов» → «Внешний порт»), 5000 — внутренний
-# API-порт (в оригинальном аддоне — поле «Unauthenticated Web interface»).
-_FRIGATE_PORT_CANDIDATES = (8971, 5000)
+# Типовые порты Frigate API (док.: docs.frigate.video/configuration/advanced/system):
+#   5000 — ВНУТРЕННИЙ порт, БЕЗ аутентификации (запросы с правами
+#          администратора) — главный порт для аддон-интеграции;
+#   8971 — ВНЕШНИЙ порт, ТРЕБУЕТ аутентификации (а у 0.16+ ещё и TLS).
+# 5000 приоритетнее: из аддона в аддон он ходит напрямую по внутренней сети.
+_FRIGATE_PORT_CANDIDATES = (5000, 8971)
 _DETECTED_TTL = 600.0  # сколько секунд доверяем автоматически найденному адресу
 
 _detected: dict[str, Any] = {"url": None, "ts": 0.0, "version": None}
 _last_scan: dict[str, float] = {"ts": 0.0}
 _SCAN_MIN_INTERVAL = 60.0  # между полными сканами внутренней сети
 
+# /api/version отвечает версией в начале тела: '0.18.2', '0.18.2-1e2f3a4',
+# '"0.16.0"' (JSON-строка) или '{"version": "..."}'. Якорь на НАЧАЛО строки
+# защищает от ложных срабатываний на HTML, где внутри страницы любые числа.
+_VERSION_RE = re.compile(r"^v?(\d+\.\d+(?:\.\d+)?(?:[-+.][0-9A-Za-z.\-]+)?)")
+
+
+def _version_from_body(data: bytes) -> str | None:
+    """Достаёт версию Frigate из тела /api/version: plain text ИЛИ JSON.
+
+    Frigate 0.16+ отвечает PlainTextResponse (например '0.18.2') —
+    док.: docs.frigate.video/integrations/api. Старые версии отдавали
+    JSON-строку '"0.15.0"', некоторые прокси — '{"version": "..."}'.
+    Всё остальное (HTML и т.п.) — не Frigate API.
+    """
+    text = data[:256].decode("utf-8", "replace").strip()
+    if not text or len(text) > 64:
+        return None  # версию такой длины не пишут — это страница/мусор
+    if text[0] in '"{':
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return None
+        if isinstance(parsed, str):
+            text = parsed.strip()
+        elif isinstance(parsed, dict):
+            text = str(parsed.get("version") or parsed.get("appVersion") or "").strip()
+        else:
+            return None
+    m = _VERSION_RE.match(text)
+    if not m:
+        return None
+    return m.group(1).rstrip(".,") or None
+
 
 def _frigate_version(url: str, timeout: float = 4.0) -> dict[str, Any]:
     """GET {url}/api/version. Не бросает: {'ok','version','kind','error'}.
 
-    kind: ok | refused | timeout | html | http | unreachable.
-    HTML-страница вместо JSON — это НЕ Frigate API (чужая служба на порту
-    или включённая аутентификация Frigate). Если по http получена SSL-ошибка
-    или ответ «это HTTPS-сервер» — повторяем по https (Frigate 0.16+ включает
-    TLS на 8971 по умолчанию, сертификат self-signed).
+    kind: ok | refused | timeout | ssl | auth | html | http | unreachable.
+    Тело /api/version — plain text ИЛИ JSON (см. _version_from_body):
+    требовать JSON нельзя — на этом ломалась вся связь с Frigate 0.16+
+    («HTTP 200, но тело не JSON (text/plain)» при живом API).
+    HTTP 400/401/403 тоже информативны:
+      * 400 — у внешнего порта 8971 (аутентификация/TLS) и у TLS-порта на
+        plain-HTTP запрос; пробуем https (Frigate 0.16+ включает TLS).
+      * 401/403 — порт требует аутентификацию (kind=auth), значит живой
+        Frigate найден, но не на том порту.
+    HTML-страница вместо версии — чужая служба или страница входа.
     """
     attempts = [("http", url)]
     if url.startswith("http://"):
         attempts.append(("https", "https://" + url[len("http://"):]))
     last: dict[str, Any] | None = None
+    res400: dict[str, Any] | None = None
     for scheme, base in attempts:
         try:
             resp = requests.get(f"{base}/api/version", timeout=timeout, verify=False)
@@ -137,19 +179,31 @@ def _frigate_version(url: str, timeout: float = 4.0) -> dict[str, Any]:
             if ("aborted" in s or "reset" in s) and scheme == "http":
                 continue
             break  # refused/timeout — https не спасёт
-        if resp.status_code == 400 and b"HTTPS server" in resp.content[:200]:
-            last = {"ok": False, "version": None, "kind": "ssl",
-                    "error": "порт отвечает только по HTTPS"}
-            continue
         ctype = resp.headers.get("content-type", "")
+        if resp.status_code == 400:
+            low = resp.content[:300].lower()
+            if b"https" in low:  # «HTTPS server», «sent to HTTPS port» и т.п.
+                last = {"ok": False, "version": None, "kind": "ssl",
+                        "error": "порт отвечает только по HTTPS"}
+            else:
+                # обычный 400 (например внешний порт 8971 без аутентификации):
+                # запоминаем и пробуем https — TLS-порт тоже отвечает 400
+                res400 = {"ok": False, "version": None, "kind": "http",
+                          "error": f"HTTP 400 ({ctype or 'без content-type'})"}
+                last = res400
+            continue  # 400 бывает и у TLS-порта — пробуем https
         if resp.ok:
-            try:
-                version = str(resp.json()).strip().strip('"')
-            except ValueError:
-                last = {"ok": False, "version": None, "kind": "html",
-                        "error": f"HTTP 200, но тело не JSON ({ctype or 'без content-type'})"}
-                break
-            return {"ok": True, "version": version, "kind": "ok", "error": None}
+            version = _version_from_body(resp.content)
+            if version:
+                return {"ok": True, "version": version, "kind": "ok", "error": None}
+            last = {"ok": False, "version": None, "kind": "html",
+                    "error": (f"HTTP 200, но по адресу не Frigate API "
+                              f"({ctype or 'без content-type'})")}
+            break
+        if resp.status_code in (401, 403):
+            last = {"ok": False, "version": None, "kind": "auth",
+                    "error": f"HTTP {resp.status_code} — порт требует аутентификации"}
+            break
         if "text/html" in ctype:
             last = {"ok": False, "version": None, "kind": "html",
                     "error": f"HTML-страница вместо API (HTTP {resp.status_code})"}
@@ -157,6 +211,8 @@ def _frigate_version(url: str, timeout: float = 4.0) -> dict[str, Any]:
         last = {"ok": False, "version": None, "kind": "http",
                 "error": f"HTTP {resp.status_code} ({ctype or 'без content-type'})"}
         break
+    if res400 is not None and (last is None or last.get("kind") == "ssl"):
+        last = res400  # честнее показать HTTP 400, чем вторичную SSL-ошибку
     return last or {"ok": False, "version": None, "kind": "unreachable", "error": "no attempt"}
 
 
@@ -177,11 +233,53 @@ def _supervisor_frigate_addons() -> list[dict[str, str]] | None:
     out: list[dict[str, str]] = []
     for a in addons:
         hay = f"{a.get('slug', '')} {a.get('name', '')}".lower()
-        if "frigate" in hay:
-            out.append({"name": a.get("name") or a.get("slug") or "Frigate",
-                        "state": a.get("state") or "?",
-                        "version": a.get("version") or ""})
+        if "frigate" not in hay:
+            continue
+        item = {"name": a.get("name") or a.get("slug") or "Frigate",
+                "state": a.get("state") or "?",
+                "version": a.get("version") or "",
+                "slug": a.get("slug") or "",
+                "hostname": ""}
+        # hostname нужен для подсказки внутреннего адреса вида
+        # http://ccab4aaf-frigate-fa:5000 — он резолвится из аддонов
+        try:
+            det = _sv_get(f"/addons/{item['slug']}", timeout=6)
+            if det.ok:
+                item["hostname"] = str(det.json().get("data", {}).get("hostname") or "")
+        except Exception:  # noqa: BLE001
+            pass
+        out.append(item)
     return out
+
+
+def frigate_addon_log_tail(limit: int = 1200) -> str | None:
+    """Хвост журнала аддона Frigate через Supervisor API — для панели.
+
+    Пользователю больше не нужно копировать логи вручную: если связи нет,
+    /api/status отдаёт последние строки журнала аддона (там видна причина,
+    например ошибка в config.yml). None — нет токена/аддона или Supervisor
+    ответил отказом. Никогда не бросает.
+    """
+    if not cfg.SUPERVISOR_TOKEN:
+        return None
+    try:
+        addons = _supervisor_frigate_addons()
+    except Exception:  # noqa: BLE001
+        return None
+    if not addons:
+        return None
+    slug = addons[0].get("slug") or ""
+    if not slug:
+        return None
+    try:
+        resp = _sv_get(f"/addons/{slug}/logs", timeout=8)
+        if not resp.ok:
+            LOG.debug("Журнал аддона %s -> HTTP %s", slug, resp.status_code)
+            return None
+        return resp.text[-limit:]
+    except Exception as exc:  # noqa: BLE001
+        LOG.debug("Журнал аддона %s недоступен: %s", slug, exc)
+        return None
 
 
 def _bridge_subnets() -> list[Any]:
@@ -350,27 +448,33 @@ def frigate_probe(frigate_url: str) -> dict[str, Any]:
 
     kind = first["kind"]
     if kind == "refused":
-        hint = (" Соединение отклонено: по этому адресу на хосте никто не слушает. "
-                "frigate_url должен указывать на ВНЕШНИЙ порт приложения Frigate — тот, "
-                "что опубликован на самом хосте. В панели Frigate «Конфигурация "
-                "прослушиваемых портов» это «Внешний порт» (по умолчанию 8971): тогда "
-                "frigate_url = http://127.0.0.1:8971. «Внутренний порт» (5000) наружу не "
-                "публикуется — 127.0.0.1:5000 из соседнего аддона недостижим. В "
-                "оригинальном аддоне Frigate то же поле называется «Unauthenticated Web "
-                "interface»: впишите туда 5000 и используйте http://127.0.0.1:5000.")
+        hint = (" Соединение отклонено: по этому адресу никто не слушает. Для аддона "
+                "правильный адрес — внутренний: http://<имя-аддона-Frigate>:5000 "
+                "(порт 5000 работает без аутентификации и с правами администратора — "
+                "docs.frigate.video/configuration/advanced/system). «Внешний порт» (8971) "
+                "требует аутентификации и публикуется на хост не всегда.")
     elif kind == "timeout":
         hint = " Frigate не ответил за 4 с — проверьте, что приложение запущено."
+    elif kind == "auth":
+        hint = (" Frigate отвечает, но порт требует аутентификацию. Внутренний порт 5000 "
+                "того же адреса работает без неё — используйте его (либо отключите "
+                "аутентификацию: auth: enabled: false).")
     elif kind == "html":
         hint = (" По адресу отвечает HTML, а не Frigate API: либо это чужая служба "
-                "(8556 у аддона Frigate — WebRTC/go2rtc, там нет API), либо включена "
-                "аутентификация — для доступа Smart Access отключите её (в конфиге "
-                "Frigate auth: enabled: false, затем Save & Restart).")
+                "(8556 у аддона Frigate — WebRTC/go2rtc, там нет API), либо страница "
+                "входа. Правильный адрес для интеграции — порт 5000 (/api/version "
+                "отвечает там текстом версии), а не веб-UI.")
     else:
         hint = ""
+    if kind == "http" and str(first.get("error", "")).startswith("HTTP 400"):
+        hint = (" HTTP 400 на этом порту — ожидаемо для ВНЕШНЕГО порта Frigate (8971): "
+                "он требует аутентификации и/или TLS (Frigate 0.16+). Для интеграции "
+                "используйте внутренний порт 5000 того же адреса — он без аутентификации "
+                "(docs.frigate.video/configuration/advanced/system).")
     extra = ""
     if html_cand:
-        extra += (f" Дополнительно: на {html_cand} похоже живёт Frigate с включённой "
-                  "аутентификацией — отключите её (auth: enabled: false).")
+        extra += (f" Дополнительно: на {html_cand} — тоже не API Frigate (см. выше про "
+                  "внешний порт и аутентификацию).")
     elif candidates:
         extra += f" Дополнительно проверен(ы) {', '.join(candidates)} — Frigate API там нет."
 
@@ -385,6 +489,10 @@ def frigate_probe(frigate_url: str) -> dict[str, Any]:
                       "сети аддонов. Откройте вкладку «Журнал» аддона Frigate — вероятно, "
                       "он падает при старте (частая причина: ошибка в config.yml); также "
                       "проверьте, что настройки портов в разделе сети сохранены.")
+            hosts = [a.get("hostname") for a in started if a.get("hostname")]
+            if hosts:
+                extra += (f" Попробуйте внутренний адрес аддона: http://{hosts[0]}:5000 "
+                          "(имя контейнера во внутренней сети HA).")
         else:
             states = "; ".join(f"«{a['name']}» — {a['state']}" for a in addons)
             extra += (f" Через Supervisor API найден аддон Frigate: {states}. "

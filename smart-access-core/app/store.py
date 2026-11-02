@@ -1,11 +1,14 @@
 """Постоянное хранилище базы «своих» (машины и лица) + журнал событий.
 
 Формат БД (JSON, атомарная запись):
-  /data/db/cars.json   -> {"<subject>": {"embeds": [[512 float]...], "updated": ts}}
-  /data/db/faces.json  -> {"<subject>": {"embeds": [[128 float]...], "updated": ts}}
+  /data/db/cars.json        -> {"<subject>": {"embeds": [[512 float]...], "updated": ts}}
+  /data/db/faces.json       -> {"<subject>": {"embeds": [[128 float]...], "updated": ts}}
+  /data/db/gesture_cfg.json -> {"<subject>": {"confirm": [gid...], "alarm": [gid...]}}
+  /data/db/gestures.json    -> {"<subject>": {"<gid>": {"embeds": [[512]...], "updated": ts}}}
 
 Оригиналы фото хранятся в /media/smart_access/{cars|faces}/<subject>/*.jpg —
 видны в Media-браузере HA, переживают переустановку аддона.
+Кропы кистей для hand-жестов — /media/smart_access/gestures/<subject>/<gid>/*.jpg.
 """
 from __future__ import annotations
 
@@ -47,7 +50,11 @@ class Store:
         os.makedirs(os.path.join(cfg.MEDIA_DIR, "unknown"), exist_ok=True)
         self.cars: dict[str, dict[str, Any]] = self._load("cars.json")
         self.faces: dict[str, dict[str, Any]] = self._load("faces.json")
+        # v1.3.0: настраиваемые жесты — привязка к лицу + прототипы кисти (CLIP)
+        self.gesture_cfg: dict[str, dict[str, list[str]]] = self._load("gesture_cfg.json")
+        self.gesture_db: dict[str, dict[str, dict[str, Any]]] = self._load("gestures.json")
         self.events: list[dict[str, Any]] = self._load_events()
+        os.makedirs(os.path.join(cfg.MEDIA_DIR, "gestures"), exist_ok=True)
 
     # ---------- БД ----------
 
@@ -92,9 +99,164 @@ class Store:
                 return False
             db.pop(subject, None)
             self._save("faces.json" if kind == "face" else "cars.json", db)
+            if kind == "face":
+                # жесты привязаны к лицу — чистим вместе с ним
+                self.gesture_cfg.pop(subject, None)
+                self.gesture_db.pop(subject, None)
+                self._save("gesture_cfg.json", self.gesture_cfg)
+                self._save("gestures.json", self.gesture_db)
         media_dir = os.path.join(cfg.MEDIA_DIR, "faces" if kind == "face" else "cars", subject)
         shutil.rmtree(media_dir, ignore_errors=True)
+        if kind == "face":
+            shutil.rmtree(self.gesture_subject_dir(subject), ignore_errors=True)
         return True
+
+    # ---------- Настраиваемые жесты (v1.3.0) ----------
+
+    def gesture_subject_dir(self, subject: str) -> str:
+        return os.path.join(cfg.MEDIA_DIR, "gestures", safe_subject(subject))
+
+    def get_subject_gestures(self, subject: str) -> dict[str, list[str]]:
+        """Настроенные жесты лица: {"confirm": [gid], "alarm": [gid]}."""
+        with self._lock:
+            rec = self.gesture_cfg.get(subject) or {}
+            return {"confirm": list(rec.get("confirm") or []),
+                    "alarm": list(rec.get("alarm") or [])}
+
+    def set_subject_gestures(self, subject: str, confirm: list[str], alarm: list[str]) -> None:
+        """Привязка жестов к лицу (замена целиком)."""
+        with self._lock:
+            if not confirm and not alarm:
+                self.gesture_cfg.pop(subject, None)
+            else:
+                self.gesture_cfg[subject] = {"confirm": list(confirm), "alarm": list(alarm)}
+            self._save("gesture_cfg.json", self.gesture_cfg)
+
+    def gestures_configured_subjects(self) -> list[str]:
+        with self._lock:
+            return sorted(set(self.gesture_cfg) | set(self.gesture_db))
+
+    def add_gesture_proto(self, subject: str, gesture: str, embeds: list[list[float]],
+                          photo: bytes | None = None) -> int:
+        """Добавление прототипов CLIP для (subject, gesture)."""
+        with self._lock:
+            rec = self.gesture_db.setdefault(subject, {})
+            g = rec.setdefault(gesture, {"embeds": [], "updated": 0})
+            g["embeds"] = (g["embeds"] + [list(map(float, v)) for v in embeds])[:MAX_EMBEDS_PER_SUBJECT]
+            g["updated"] = time.time()
+            self._save("gestures.json", self.gesture_db)
+        if photo:
+            self._save_gesture_photo(subject, gesture, photo)
+        return len(embeds)
+
+    def replace_gesture_protos(self, subject: str, gesture: str, embeds: list[list[float]]) -> None:
+        """Замена всех прототипов (subject, gesture) — переобучение по фото."""
+        with self._lock:
+            rec = self.gesture_db.setdefault(subject, {})
+            if embeds:
+                rec[gesture] = {"embeds": [list(map(float, v)) for v in embeds][:MAX_EMBEDS_PER_SUBJECT],
+                                "updated": time.time()}
+            else:
+                rec.pop(gesture, None)
+            if not rec:
+                self.gesture_db.pop(subject, None)
+            self._save("gestures.json", self.gesture_db)
+
+    def gesture_protos(self, subject: str, gesture: str) -> np.ndarray | None:
+        """Матрица прототипов (n, dim) или None."""
+        with self._lock:
+            rec = (self.gesture_db.get(subject) or {}).get(gesture) or {}
+            arr = np.asarray(rec.get("embeds") or [], dtype=np.float32)
+        return arr if arr.size else None
+
+    def gesture_info(self, subject: str) -> dict[str, dict[str, int]]:
+        """{gid: {"embeds": n, "photos": n}} для UI (по одному subject)."""
+        with self._lock:
+            rec = self.gesture_db.get(subject) or {}
+        out: dict[str, dict[str, int]] = {}
+        for gid, g in rec.items():
+            try:
+                photos = len(self.list_gesture_photos(subject, gid))
+            except Exception:  # noqa: BLE001
+                photos = 0
+            out[gid] = {"embeds": len(g.get("embeds") or []), "photos": photos}
+        return out
+
+    def replace_gesture_subject(self, old: str, new: str) -> None:
+        """Перенос настроек и прототипов при переименовании (не используется пока)."""
+        with self._lock:
+            if old in self.gesture_cfg:
+                self.gesture_cfg[new] = self.gesture_cfg.pop(old)
+            if old in self.gesture_db:
+                self.gesture_db[new] = self.gesture_db.pop(old)
+            self._save("gesture_cfg.json", self.gesture_cfg)
+            self._save("gestures.json", self.gesture_db)
+
+    # фото жестов: /media/smart_access/gestures/<subject>/<gid>/*.jpg (кропы кистей)
+
+    def gesture_photos_dir(self, subject: str, gesture: str) -> str:
+        return os.path.join(self.gesture_subject_dir(subject), safe_subject(gesture))
+
+    def list_gesture_photos(self, subject: str, gesture: str) -> list[dict[str, Any]]:
+        d = self.gesture_photos_dir(subject, gesture)
+        out: list[dict[str, Any]] = []
+        try:
+            for f in os.listdir(d):
+                if not f.lower().endswith(IMG_EXT):
+                    continue
+                p = os.path.join(d, f)
+                out.append({"file": f, "ts": os.path.getmtime(p), "size": os.path.getsize(p)})
+        except OSError:
+            return []
+        return sorted(out, key=lambda r: (r["ts"], r["file"]))
+
+    def all_gesture_photos(self, subject: str, gesture: str) -> list[str]:
+        d = self.gesture_photos_dir(subject, gesture)
+        try:
+            return [os.path.join(d, f) for f in os.listdir(d)
+                    if f.lower().endswith(IMG_EXT)]
+        except OSError:
+            return []
+
+    def delete_gesture_photos(self, subject: str, gesture: str, files: list[str]) -> int:
+        d = self.gesture_photos_dir(subject, gesture)
+        deleted = 0
+        for f in files:
+            fname = os.path.basename(str(f))
+            if not fname.lower().endswith(IMG_EXT):
+                continue
+            try:
+                os.remove(os.path.join(d, fname))
+                deleted += 1
+            except OSError:
+                pass
+        return deleted
+
+    def gesture_photo_path(self, subject: str, gesture: str, fname: str) -> str | None:
+        """Путь к фото жеста для HTTP (защита от ../)."""
+        try:
+            d = self.gesture_photos_dir(subject, gesture)
+        except ValueError:
+            return None
+        fname = os.path.basename(str(fname))
+        if not fname.lower().endswith(IMG_EXT):
+            return None
+        p = os.path.join(d, fname)
+        return p if os.path.isfile(p) else None
+
+    def _save_gesture_photo(self, subject: str, gesture: str, photo: bytes) -> None:
+        directory = self.gesture_photos_dir(subject, gesture)
+        os.makedirs(directory, exist_ok=True)
+        fname = time.strftime("%Y%m%d-%H%M%S") + f"-{int((time.time()%1)*1000):03d}" \
+            + f"-{uuid.uuid4().hex[:8]}.jpg"
+        try:
+            with open(os.path.join(directory, fname), "wb") as fh:
+                fh.write(photo)
+            files = sorted(os.listdir(directory))
+            for old in files[:-60]:
+                os.remove(os.path.join(directory, old))
+        except OSError as exc:
+            LOG.warning("Не сохранил фото жеста (%s/%s): %s", subject, gesture, exc)
 
     def replace_subject(self, kind: str, subject: str, embeds: list[list[float]]) -> None:
         """Замена всех прототипов subject (переобучение по фото из /media)."""
@@ -246,6 +408,8 @@ class Store:
         if not d:
             raise ValueError("kind must be car|face")
         return os.path.join(cfg.MEDIA_DIR, d)
+
+    # (фото hand-жестов см. gesture_photos_dir / _save_gesture_photo выше)
 
     def photos_dir(self, kind: str, subject: str) -> str:
         return os.path.join(self._media_base(kind), safe_subject(subject))

@@ -60,6 +60,10 @@ def _read_options() -> dict[str, Any]:
             "face_threshold": 0.363,
             "min_confirm_frames": 2,
             "bridge_fps": 1.5,
+            # v1.3.0: темп раздачи кадров камеры с rtsp_url (мост сам читает
+            # RTSP и раздаёт Frigate/HA); для остальных камер темп задаёт
+            # bridge_fps (источник — снимки/поток HA)
+            "stream_fps": 5.0,
             "unknown_keep_days": 7,
         },
         "vlm": {
@@ -70,11 +74,18 @@ def _read_options() -> dict[str, Any]:
             "mode": "gray_zone",
             "timeout_sec": 6,
         },
-        # Жесты: подтверждение открытия (одна рука вверх) и тревога (обе руки).
-        # Требуют модель /models/yolov8n-pose.onnx (вшита в образ).
+        # Жесты (v1.3.0): настраиваемые, отдельно для каждого лица
+        # (панель -> «Жесты и тревога»). hand-жесты (victory/ok/thumbs/palm)
+        # обучаются фото с камеры и матчатся CLIP-прототипами с порогом
+        # threshold; pose-жесты (touch_nose/touch_ear/рука вверх) — правила
+        # по ключевым точкам. default_confirm/default_alarm — для лиц БЕЗ
+        # своей настройки (совместимость v1.2.0).
         "gestures": {
             "enabled": False,
             "min_frames": 1,
+            "threshold": 0.80,
+            "default_confirm": ["one_hand_up"],
+            "default_alarm": ["both_hands_up"],
         },
         # Тревога (насильственное открытие под угрозой): звонок через ha-sip
         # с текстом (Piper озвучивает TTS-движком HA). numbers — по одному

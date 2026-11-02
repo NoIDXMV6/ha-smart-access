@@ -105,14 +105,18 @@ def test_generator_fps_follows_bridge_fps_for_bridge_and_5_for_rtsp():
     assert m2 and m2.group(1) == "5", "RTSP-камера: fps остаётся 5"
 
 
-def test_generator_keeps_rtsp_preset_and_comments():
+def test_generator_rtsp_camera_goes_via_bridge_with_comment():
+    """v1.3.0: rtsp-камера тоже читается мостом (один клиент камеры);
+    исходное имя остаётся рядом со slug. Детали — в
+    test_v130_single_consumer.py."""
     text = build_frigate_config(
         _conf([{"name": "kalitka", "mode": "face",
                 "rtsp_url": "rtsp://admin:pw@192.168.1.7:554/sub",
                 "display_name": "Калитка"}]),
         _bridge(),
     )
-    assert "input_args: preset-rtsp-tcp" in text
+    assert "http://172.30.32.1:8100/mjpeg/kalitka" in text
+    assert "preset-rtsp-tcp" not in text
     assert "  kalitka:  # «Калитка»" in text  # исходное имя рядом со slug
 
 
@@ -120,34 +124,37 @@ def test_generator_keeps_rtsp_preset_and_comments():
 # 2. Мост: параллельный опрос
 
 def test_bridge_polls_cameras_in_parallel(monkeypatch):
-    """3 медленные камеры: у КАЖДОЙ свой fps, а не 1/(сумма задержек)."""
+    """3 медленные камеры: у КАЖДОЙ свой fps, а не 1/(сумма задержек).
+    v1.3.0: каждый получает камеры — отдельный feeder, запускается первым
+    подписчиком (_kick); опрос снимков идёт параллельно (executor)."""
 
     async def run() -> dict[str, int]:
-        def fake_get(entity: str) -> tuple[bytes, str, str]:
-            # как настоящий get_camera_image_ex: БЛОКИРУЮЩИЙ вызов в
-            # executor-потоке, кортеж (jpeg, источник, ошибка)
-            time.sleep(0.8)
-            return (b"\xff\xd8\xff\x00", "proxy", "")
+        def fake_snapshot(entity: str, timeout: int = 8) -> tuple[bytes | None, str]:
+            # как настоящий get_camera_snapshot_ex: БЛОКИРУЮЩИЙ вызов в
+            # executor-потоке, кортеж (jpeg, ошибка)
+            time.sleep(0.5)
+            return (b"\xff\xd8\xff\x00", "")
 
-        monkeypatch.setattr(ha_api, "get_camera_image_ex", fake_get)
-        b = Bridge(fps=1.5)
+        monkeypatch.setattr(ha_api, "get_camera_snapshot_ex", fake_snapshot)
+        b = Bridge(fps=5.0)
         b.set_cameras([
             {"name": "prud", "ha_entity": "camera.prud"},
             {"name": "kalitka", "ha_entity": "camera.kalitka"},
             {"name": "tat", "ha_entity": "camera.tat"},
         ])
+        await b.start()
         for c in b.entities:
             b.clients[c] = 1  # имитируем подключённых клиентов (без HTTP)
-        await b.start()
+            b._kick(c)        # первый подписчик запускает получателя
         await asyncio.sleep(3.0)
         await b.stop()
         return dict(b.frames)
 
     got = asyncio.run(run())
-    # при старом (последовательном) опросе тик = 3*0.8 = 2.4 c → за 3 c
-    # последняя камера получила бы ≤1 кадр; при параллельном у всех ≥2
+    # при старом (последовательном) опросе тик = 3*0.5 = 1.5 c → за 3 c
+    # последняя камера получила бы ≤2 кадра; при параллельном у всех ≥4
     for cam, n in got.items():
-        assert n >= 2, f"{cam}: {n} кадров за 3 c — опрос не параллельный?"
+        assert n >= 4, f"{cam}: {n} кадров за 3 c — опрос не параллельный?"
 
 
 # --------------------------------------------------------------------- #

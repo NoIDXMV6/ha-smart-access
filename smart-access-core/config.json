@@ -1,8 +1,8 @@
 {
   "name": "Smart Access Core",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "slug": "smart-access-core",
-  "description": "Умный допуск на одной VM с HAOS: авто-открытие шлагбаумов по своим машинам и калитки по лицам (с подтверждением жестом и тревогой). LLM — только внешний URL+token+модель (опционально).",
+  "description": "Умный допуск на одной VM с HAOS: авто-открытие шлагбаумов по своим машинам и калитки по лицам (с настраиваемыми по каждому лицу жестами и тревогой). LLM — только внешний URL+token+модель (опционально).",
   "url": "https://github.com/NoIDXMV6/ha-smart-access",
   "image": "ghcr.io/noidxmv6/smart-access-core-{arch}",
   "arch": [
@@ -66,6 +66,7 @@
       "face_threshold": 0.363,
       "min_confirm_frames": 2,
       "bridge_fps": 1.5,
+      "stream_fps": 5.0,
       "unknown_keep_days": 7
     },
     "vlm": {
@@ -77,7 +78,10 @@
     },
     "gestures": {
       "enabled": false,
-      "min_frames": 1
+      "min_frames": 1,
+      "threshold": 0.80,
+      "default_confirm": ["one_hand_up"],
+      "default_alarm": ["both_hands_up"]
     },
     "alarm": {
       "enabled": false,
@@ -102,7 +106,7 @@
     "cameras": [
       {
         "name": "str",
-        "ha_entity": "str",
+        "ha_entity": "str?",
         "mode": "list(car|face|car+face|off)",
         "rtsp_url": "str?",
         "executor_service": "str?",
@@ -118,6 +122,7 @@
       "face_threshold": "float(0.2,0.6)?",
       "min_confirm_frames": "int(1,3)?",
       "bridge_fps": "float(0.5,5)?",
+      "stream_fps": "float(1,15)?",
       "unknown_keep_days": "int(1,30)?"
     },
     "vlm": {
@@ -130,7 +135,10 @@
     },
     "gestures": {
       "enabled": "bool?",
-      "min_frames": "int(1,5)?"
+      "min_frames": "int(1,5)?",
+      "threshold": "float(0.5,0.95)?",
+      "default_confirm": "list(touch_nose|touch_ear|victory|ok|thumbs_up|thumbs_down|palm|one_hand_up|both_hands_up)?",
+      "default_alarm": "list(touch_nose|touch_ear|victory|ok|thumbs_up|thumbs_down|palm|one_hand_up|both_hands_up)?"
     },
     "alarm": {
       "enabled": "bool?",

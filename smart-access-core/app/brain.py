@@ -20,7 +20,7 @@ from typing import Any, Callable
 import paho.mqtt.client as mqtt
 
 from . import config as cfg
-from . import ha_api, models, store, vlm
+from . import gestures, ha_api, models, store, vlm
 from .store import Store
 
 LOG = logging.getLogger("smart_access.brain")
@@ -43,10 +43,13 @@ def _in_schedule(spec: str) -> bool:
 
 class Brain:
     def __init__(self, store: Store, models_: models.Models,
-                 on_status: Callable[[], None]) -> None:
+                 on_status: Callable[[], None], bridge=None) -> None:
         self.store = store
         self.models = models_
         self.on_status = on_status
+        # v1.3.0: мост (если передан) — источник живых кадров для identify
+        # без новой сессии к камере (у камеры и так один клиент — мост)
+        self.bridge = bridge
         self.client: mqtt.Client | None = None
         self.stats: dict[str, Any] = {
             "events_seen": 0, "grants": 0, "denied": 0, "alarms": 0,
@@ -285,36 +288,99 @@ class Brain:
                 self.stats["denied"] += 1
             return
 
-        # --- жесты (v1.2.0): подтверждение открытия + тревожный жест ---
+        # --- жесты (v1.3.0): настраиваемые, отдельно для каждого лица ---
         gest = conf.gestures or {}
         gestures_on = bool(gest.get("enabled")) and self.models.gestures_ok
         if gestures_on:
-            g = self.models.detect_gesture(jpg_full)
-            if g.get("alarm"):
-                # обе руки вверх = тревога: открыть И одновременно послать инцидент
-                self._processed.add(event_id)
-                LOG.warning("ALARM: %s на %s — тревожный жест (обе руки вверх), score=%.3f",
-                            best_subject, name, best_score)
-                self._grant("face", cam, best_subject, best_score,
-                            best_face_jpg or jpg_full, alarm=True)
-                return
-            if not g.get("confirm"):
-                # лицо своё, но жеста-подтверждения нет — НЕ открываем
-                if event_id not in self._unknown_logged:
-                    self._unknown_logged.add(event_id)
-                    self._log_event(
-                        "face", name, "gesture_wait",
-                        f"{best_subject} score={best_score:.3f} — ждём жест (одна рука вверх)",
-                        best_score, best_subject)
+            if self._evaluate_gestures(cam, name, event_id, best_subject,
+                                       best_score, best_face_jpg or jpg_full):
                 return
 
         self._processed.add(event_id)
         self._grant("face", cam, best_subject, best_score, best_face_jpg or jpg_full)
 
+    # ---------------- настраиваемые жесты (v1.3.0) ----------------
+
+    @staticmethod
+    def _gesture_list(value: Any, fallback: list[str]) -> list[str]:
+        """Список id жестов из конфига: список или 'a,b' строка."""
+        return gestures.gesture_list_safe(value, fallback)
+
+    def _gesture_sets_for(self, subject: str) -> tuple[list[str], list[str], bool]:
+        """Жесты лица: (confirm, alarm, настроено_ли_персонально).
+
+        Лицо без своей настройки — совместимость v1.2.0: default_confirm /
+        default_alarm из опций (по умолчанию «одна рука вверх» / «обе руки»).
+        """
+        g = self.store.get_subject_gestures(subject)
+        if g.get("confirm") or g.get("alarm"):
+            return g["confirm"], g["alarm"], True
+        gest = cfg.CONF.gestures or {}
+        confirm = self._gesture_list(gest.get("default_confirm"), ["one_hand_up"])
+        alarm = self._gesture_list(gest.get("default_alarm"), ["both_hands_up"])
+        return confirm, alarm, False
+
+    def _evaluate_gestures(self, cam: dict[str, Any], name: str, event_id: str,
+                           subject: str, score: float, jpg: bytes) -> bool:
+        """Решение по жестам для распознанного лица. True — решение принято.
+
+        Тревожный жест лица -> открытие + инцидент; жест-подтверждение ->
+        открытие; иначе — gesture_wait (трек продолжается, следующие
+        update-кадры повторят проверку).
+        """
+        gest = cfg.CONF.gestures or {}
+        threshold = float(gest.get("threshold", 0.80))
+        confirm_ids, alarm_ids, configured = self._gesture_sets_for(subject)
+
+        # прототипы hand-жестов этого лица (CLIP)
+        enrolled: dict[str, np.ndarray] = {}
+        missing: list[str] = []
+        for gid in dict.fromkeys(confirm_ids + alarm_ids):
+            if gestures.GESTURES.get(gid, {}).get("type") != "hand":
+                continue
+            protos = self.store.gesture_protos(subject, gid)
+            if protos is None or len(protos) == 0:
+                missing.append(gid)
+            else:
+                enrolled[gid] = protos
+
+        res = self.models.analyze_gestures(jpg, enrolled=enrolled or None,
+                                           threshold=threshold)
+        detected = set(res.get("pose") or []) | set(res.get("hands") or [])
+        alarm_hits = [g for g in alarm_ids if g in detected]
+        confirm_hits = [g for g in confirm_ids if g in detected]
+        lab = gestures.gesture_label
+
+        if alarm_hits:
+            self._processed.add(event_id)
+            note = ", ".join(map(lab, alarm_hits))
+            LOG.warning("ALARM: %s на %s — тревожный жест (%s), score=%.3f",
+                        subject, name, note, score)
+            self._grant("face", cam, subject, score, jpg, alarm=True, gesture_note=note)
+            return True
+        if confirm_hits:
+            self._processed.add(event_id)
+            self._grant("face", cam, subject, score, jpg,
+                        gesture_note=", ".join(map(lab, confirm_hits)))
+            return True
+
+        # жеста нет — ждём: трек жив, следующие кадры повторят проверку
+        if event_id not in self._unknown_logged:
+            self._unknown_logged.add(event_id)
+            want = " или ".join(map(lab, dict.fromkeys(confirm_ids + alarm_ids))) or "—"
+            seen = ", ".join(map(lab, sorted(detected))) or "жестов не видно"
+            miss = f"; НЕ ОБУЧЕН: {', '.join(map(lab, missing))}" if missing else ""
+            suffix = "" if configured else " (жесты лица не настроены — работает старое правило)"
+            self._log_event(
+                "face", name, "gesture_wait",
+                f"{subject} score={score:.3f} — ждём жест: {want}{suffix} "
+                f"(в кадре: {seen}{miss})", score, subject)
+        return True
+
     # ---------------- открытие ----------------
 
     def _grant(self, kind: str, cam: dict[str, Any], subject: str, score: float,
-               jpg: bytes, alarm: bool = False) -> None:
+               jpg: bytes, alarm: bool = False, gesture_note: str = "") -> None:
         conf = cfg.CONF
         name = cam["name"]
         cooldown = int(cam.get("cooldown", 45))
@@ -331,16 +397,18 @@ class Brain:
 
         if alarm:
             action = "alarm"
-            detail = f"{subject} score={score:.3f} — ТРЕВОЖНЫЙ ЖЕСТ (обе руки вверх)"
+            detail = f"{subject} score={score:.3f} — ТРЕВОЖНЫЙ ЖЕСТ ({gesture_note or 'не указан'})"
         else:
             action = "opened" if (cam.get("executor_service") or "").strip() else "detected"
             detail = f"{subject} score={score:.3f}"
+            if gesture_note:
+                detail += f" — жест: {gesture_note}"
         self._log_event(kind, name, action, detail, score, subject)
 
         payload_event = {
             "kind": kind, "camera": name, "camera_entity": cam.get("ha_entity"),
             "subject": subject, "score": round(score, 3), "action": action,
-            "alarm": alarm, "ts": now,
+            "alarm": alarm, "gesture": gesture_note or None, "ts": now,
         }
         if self.client:
             self.client.publish("smart_access/event", json.dumps(payload_event, ensure_ascii=False), qos=1)
@@ -500,6 +568,96 @@ class Brain:
         self.publish_status()
         return {"ok": True, "results": results}
 
+    # ---------------- обучение hand-жестов (v1.3.0, «как лица») ----------------
+
+    def enroll_gesture(self, subject: str, gesture: str, jpg: bytes) -> dict[str, Any]:
+        """Обучение hand-жеста по кадру: поза -> кропы кистей -> CLIP-прототипы.
+
+        С каждого валидного запястья берётся кроп-квадрат, из него 8
+        аугментаций -> прототипы. Кропы сохраняются в
+        /media/smart_access/gestures/<subject>/<gid>/ — ошибочные можно
+        удалить в панели (прототипы пересчитаются).
+        """
+        gid = str(gesture or "").strip()
+        if not gestures.is_valid_gesture(gid):
+            return {"ok": False, "error": f"неизвестный жест: {gesture}"}
+        if gestures.GESTURES[gid]["type"] != "hand":
+            return {"ok": False,
+                    "error": "этот жест распознаётся по правилам — обучение не нужно"}
+        if not self.models.gestures_ok:
+            return {"ok": False, "error": "модель поз недоступна"}
+        if not self.models.ok:
+            return {"ok": False, "error": "CLIP недоступен"}
+        crops = self.models.hand_crop_jpegs(jpg)
+        if not crops:
+            return {"ok": False,
+                    "error": "рука на кадре не найдена (запястье не видно — подойдите ближе)"}
+        added = 0
+        for _arm, crop_jpg in crops:
+            embeds = self.models.gesture_embedding(crop_jpg, n_views=8)
+            if embeds:
+                self.store.add_gesture_proto(subject, gid, embeds, photo=crop_jpg)
+                added += len(embeds)
+        if not added:
+            return {"ok": False, "error": "CLIP недоступен"}
+        LOG.info("Enroll жеста «%s» для «%s»: +%s прототипов", gid, subject, added)
+        self._log_event("face", "gesture", "enrolled",
+                        f"жест {gestures.gesture_label(gid)}: {subject}", 0, subject)
+        self.publish_status()
+        return {"ok": True, "added": added, "crops": len(crops)}
+
+    def retrain_gesture(self, subject: str, gesture: str) -> dict[str, Any]:
+        """Пересчёт прототипов (subject, gesture) по сохранённым кропам."""
+        gid = str(gesture or "").strip()
+        if not gestures.is_valid_gesture(gid) or gestures.GESTURES[gid]["type"] != "hand":
+            return {"ok": False, "error": "жест не относится к обучаемым"}
+        embeds: list[list[float]] = []
+        for path in self.store.all_gesture_photos(subject, gid):
+            try:
+                with open(path, "rb") as fh:
+                    jpg = fh.read()
+            except OSError:
+                continue
+            embs = self.models.gesture_embedding(jpg, n_views=8)
+            if embs:
+                embeds.extend(embs)
+        self.store.replace_gesture_protos(subject, gid, embeds)
+        LOG.info("Переобучение жеста «%s» для «%s»: %s прототипов", gid, subject, len(embeds))
+        self.publish_status()
+        return {"ok": True, "added": len(embeds)}
+
+    def test_gesture(self, subject: str, jpg: bytes) -> dict[str, Any]:
+        """Проверка кадра: какие настроенные жесты лица видны (для панели)."""
+        threshold = float((cfg.CONF.gestures or {}).get("threshold", 0.80))
+        confirm_ids, alarm_ids, configured = self._gesture_sets_for(subject)
+        enrolled: dict[str, np.ndarray] = {}
+        missing: list[str] = []
+        for gid in dict.fromkeys(confirm_ids + alarm_ids):
+            if gestures.GESTURES.get(gid, {}).get("type") != "hand":
+                continue
+            protos = self.store.gesture_protos(subject, gid)
+            if protos is None or len(protos) == 0:
+                missing.append(gid)
+            else:
+                enrolled[gid] = protos
+        res = self.models.analyze_gestures(jpg, enrolled=enrolled or None,
+                                           threshold=threshold)
+        detected = set(res.get("pose") or []) | set(res.get("hands") or [])
+        return {
+            "ok": res.get("available", False),
+            "persons": res.get("persons", 0),
+            "pose": res.get("pose", []),
+            "hand_scores": {k: round(float(v), 3)
+                            for k, v in (res.get("hand_scores") or {}).items()},
+            "threshold": threshold,
+            "hits_confirm": [g for g in confirm_ids if g in detected],
+            "hits_alarm": [g for g in alarm_ids if g in detected],
+            "missing": missing,
+            "configured": configured,
+            "labels": {g: gestures.gesture_label(g)
+                       for g in set(confirm_ids) | set(alarm_ids) | set(detected)},
+        }
+
     # ---------------- enrollment ----------------
 
     def _handle_enroll(self, kind: str, payload: bytes) -> None:
@@ -569,10 +727,12 @@ class Brain:
         elif cmd == "identify":
             entity = str(data.get("entity_id") or "")
             kind = str(data.get("kind") or "car")
-            # v1.2.1: с запасным путём — для камер без рабочих одиночных
-            # снимков (универсальная RTSP-камера калитки) кадр берётся
-            # из потока HA, иначе кнопка «Обучить» отвечает «кадр недоступен»
-            jpg = ha_api.get_camera_image_ex(entity)[0]
+            # v1.3.0: сначала живой кадр моста (камера не получает ещё одну
+            # сессию); нет — прежний путь с запасным потоком (ручное действие,
+            # допустимо); для камеры-«потока» это одна сессия, не шторм
+            jpg = self.bridge.snapshot_for_entity(entity) if self.bridge else None
+            if not jpg:
+                jpg = ha_api.get_camera_image_ex(entity)[0]
             if not jpg:
                 self._ack({"cmd": "identify", "ok": False, "error": "кадр недоступен"})
                 return
@@ -653,6 +813,8 @@ class Brain:
             "gestures": {
                 "enabled": bool((cfg.CONF.gestures or {}).get("enabled")),
                 "model_ok": self.models.gestures_ok,
+                "threshold": float((cfg.CONF.gestures or {}).get("threshold", 0.80)),
+                "configured": len(self.store.gestures_configured_subjects()),
             },
             "alarm": {
                 "enabled": bool((cfg.CONF.alarm or {}).get("enabled")),

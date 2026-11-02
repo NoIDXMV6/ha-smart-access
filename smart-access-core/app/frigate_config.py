@@ -2,15 +2,18 @@
 
 Вынесен из main.py (v1.1.13), чтобы тесты могли проверять генератор без
 импорта brain/models (onnxruntime и пр.).
+
+v1.3.0 — АРХИТЕКТУРА «ОДИН ПОЛУЧАТЕЛЬ»: ВСЕ камеры идут через MJPEG-мост
+аддона, включая камеры с rtsp_url (мост сам читает их RTSP и раздаёт кадры
+и Frigate, и HA — у камеры остаётся ровно один клиент). Раньше rtsp-камеры
+читались Frigate напрямую: клиенты камеры = Frigate + карточка HA, а у
+дешёвых камер и облачных прокси от этого начинается деградация потоков.
 """
 from __future__ import annotations
 
 
 def build_frigate_config(conf, bridge) -> str:
     """Генерирует config.yml для Frigate из настроек аддона.
-
-    Камеры с rtsp_url идут напрямую (TCP-транспорт — надёжнее для Hikvision),
-    остальные — через MJPEG-мост аддона.
 
     Особенности сети аддона Frigate (он НЕ host-network, а мост hassio):
       * MQTT-брокер недоступен ему по localhost — только по имени аддона
@@ -30,11 +33,14 @@ def build_frigate_config(conf, bridge) -> str:
         mqtt_host = "core-mosquitto"
     mqtt_user = str(conf.mqtt.get("user") or "").strip()
     mqtt_pass = str(conf.mqtt.get("password") or "")
+    stream_fps = max(1, round(float(conf.recognition.get("stream_fps", 5.0))))
     lines: list[str] = []
-    lines.append("# === Сгенерировано Smart Access Core ===")
+    lines.append("# === Сгенерировано Smart Access Core v1.3.0 ===")
     lines.append("# Куда вставить: веб-интерфейс Frigate → Configuration → вставить → Save & Restart.")
     lines.append("# NB: mqtt.host подставлен как core-mosquitto (аддон Frigate не видит localhost),")
     lines.append("#     а мост камер — по адресу шлюза 172.30.32.1 (хост, где слушает Smart Access).")
+    lines.append("# ВСЕ камеры читают поток у моста Smart Access — у каждой камеры один")
+    lines.append("# получатель (сам мост), Frigate и HA потребляют с него.")
     lines.append("mqtt:")
     lines.append(f"  host: {mqtt_host}")
     lines.append(f"  port: {int(conf.mqtt.get('port') or 1883)}")
@@ -72,25 +78,23 @@ def build_frigate_config(conf, bridge) -> str:
             lines.append(f"  {name}:")
         lines.append("    ffmpeg:")
         lines.append("      inputs:")
-        fps = 5
+        # НЕ пишем «-f mjpeg» (v1.1.13): сырой демуксер mjpeg не может
+        # завершить пробу формата на multipart-потоке моста — считает
+        # поток 25 fps и ждёт ~5 с «виртуального» времени (=~125 кадров);
+        # при реальных 1.5 fps это минуты, ffmpeg не выдаёт НИ ОДНОГО
+        # кадра за 20 с, и watchdog Frigate убивает его по кругу
+        # («No frames received from <camera> in 20 seconds»). Без -f
+        # ffmpeg сам видит multipart/x-mixed-replace и читает поток
+        # сразу (проверено автотестом с настоящим ffmpeg).
+        lines.append(f"        - path: {bridge.frigate_url(name)}")
+        lines.append("          input_args: >-")
+        lines.append("            -use_wallclock_as_timestamps 1")
+        lines.append("            -fflags +genpts+discardcorrupt")
+        # темп моста: камеры с rtsp_url мост читает сам с полным fps
+        # (stream_fps), остальные — в темпе снимков/потока (bridge_fps)
         if rtsp:
-            # локальный RTSP — лучший путь: полный fps и разрешение без моста
-            lines.append(f"        - path: {rtsp}")
-            lines.append("          input_args: preset-rtsp-tcp")
+            fps = stream_fps
         else:
-            # НЕ пишем «-f mjpeg» (v1.1.13): сырой демуксер mjpeg не может
-            # завершить пробу формата на multipart-потоке моста — считает
-            # поток 25 fps и ждёт ~5 с «виртуального» времени (=~125 кадров);
-            # при реальных 1.5 fps это минуты, ffmpeg не выдаёт НИ ОДНОГО
-            # кадра за 20 с, и watchdog Frigate убивает его по кругу
-            # («No frames received from <camera> in 20 seconds»). Без -f
-            # ffmpeg сам видит multipart/x-mixed-replace и читает поток
-            # сразу (проверено автотестом с настоящим ffmpeg).
-            lines.append(f"        - path: {bridge.frigate_url(name)}")
-            lines.append("          input_args: >-")
-            lines.append("            -use_wallclock_as_timestamps 1")
-            lines.append("            -fflags +genpts+discardcorrupt")
-            # мост отдаёт ~bridge_fps кадров/с — детектору незачем просить 5
             fps = max(1, round(float(conf.recognition.get("bridge_fps", 1.5))))
         lines.append("          roles:")
         lines.append("            - detect")

@@ -21,6 +21,7 @@ import numpy as np
 import onnxruntime as ort
 
 from . import config as cfg
+from . import gestures as gestures
 
 LOG = logging.getLogger("smart_access.models")
 
@@ -217,12 +218,7 @@ class Models:
             return None, w, h
         return self._rec.alignCrop(img, faces[0]), w, h
 
-    # ---------- жесты (YOLOv8n-pose, 17 ключевых точек COCO) ----------
-
-    # Индексы точек COCO: 0 nose, 5 L-shoulder, 6 R-shoulder,
-    #                     7 L-elbow, 8 R-elbow, 9 L-wrist, 10 R-wrist
-    KP_L_SHOULDER, KP_R_SHOULDER = 5, 6
-    KP_L_WRIST, KP_R_WRIST = 9, 10
+    # ---------- жесты (YOLOv8n-pose + CLIP-прототипы кисти, v1.3.0) ----------
 
     def detect_poses(self, jpg: bytes, conf_th: float = 0.35,
                      max_persons: int = 5) -> list[dict[str, Any]]:
@@ -286,37 +282,150 @@ class Models:
 
     @classmethod
     def classify_gesture(cls, persons: list[dict[str, Any]], kpt_conf: float = 0.25) -> dict[str, Any]:
-        """Правила жестов по ключевым точкам.
+        """СОВМЕСТИМОСТЬ v1.2.0: 'confirm' — одна рука вверх, 'alarm' — обе.
 
-        * 'alarm'   — ОБЕ руки подняты выше плеч (классический SOS-жест);
-        * 'confirm' — хотя бы ОДНА рука поднята выше плеча.
-        Точка считается валидной при score >= kpt_conf.
+        Обёртка над gestures.pose_gestures(): правила те же, но новые версии
+        используют analyze_gestures() с настраиваемым каталогом жестов.
         """
         res: dict[str, Any] = {"alarm": False, "confirm": False,
                                "persons": len(persons), "available": True}
-
-        def arm_up(kpt: np.ndarray, wrist_i: int, shoulder_i: int) -> bool:
-            if kpt.shape[0] <= shoulder_i:
-                return False
-            wr, sh = kpt[wrist_i], kpt[shoulder_i]
-            if wr[2] < kpt_conf or sh[2] < kpt_conf:
-                return False
-            return float(wr[1]) < float(sh[1])  # y растёт вниз: рука ВЫШЕ плеча
-
         for p in persons:
             kpt = p.get("kpt")
             if kpt is None:
                 continue
-            left_up = arm_up(kpt, cls.KP_L_WRIST, cls.KP_L_SHOULDER)
-            right_up = arm_up(kpt, cls.KP_R_WRIST, cls.KP_R_SHOULDER)
-            if left_up and right_up:
+            hits, _det = gestures.pose_gestures(kpt, kpt_conf=kpt_conf)
+            if "both_hands_up" in hits:
                 res["alarm"] = True
-            elif left_up or right_up:
+            elif "one_hand_up" in hits:
                 res["confirm"] = True
         return res
 
     def detect_gesture(self, jpg: bytes) -> dict[str, Any]:
-        """Полный путь: кадр -> позы -> жест. Работает только при gestures_ok."""
+        """Полный путь: кадр -> позы -> жест (совместимость v1.2.0)."""
         if self._pose is None:
             return {"alarm": False, "confirm": False, "persons": 0, "available": False}
         return self.classify_gesture(self.detect_poses(jpg))
+
+    # ---------- v1.3.0: настраиваемые жесты ----------
+
+    @staticmethod
+    def _crop(img: np.ndarray, box: tuple[float, float, float, float]) -> np.ndarray | None:
+        h, w = img.shape[:2]
+        x1, y1, x2, y2 = gestures.clamp_box(box, w, h)
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            return None
+        return img[y1:y2, x1:x2]
+
+    def gesture_embedding(self, jpg: bytes, n_views: int = 4) -> list[list[float]] | None:
+        """CLIP-эмбеддинги кропа кисти: список по числу аугментаций (views)."""
+        if self._clip is None:
+            return None
+        img = _jpeg_decode(jpg)
+        if img is None:
+            return None
+        views = self.augment(img, n_views=max(1, int(n_views)))
+        batch = np.stack([self._clip_pre(v) for v in views]).astype(np.float32)
+        out = self._clip.run(["image_embeds"], {"pixel_values": batch})[0]
+        return [list(map(float, v)) for v in out]
+
+    def hand_crop_jpegs(self, jpg: bytes, kpt_conf: float = 0.3,
+                        best_person: bool = False) -> list[tuple[str, bytes]]:
+        """Кропы кистей (jpg) с кадра — для обучения hand-жестов.
+
+        best_person=True — только у самого «уверенного» человека (для тестов
+        и проверки), иначе у всех найденных (для обучения со камеры).
+        """
+        if self._pose is None:
+            return []
+        persons = self.detect_poses(jpg)
+        if not persons:
+            return []
+        if best_person:
+            persons = sorted(persons, key=lambda p: -p.get("conf", 0.0))[:1]
+        img = _jpeg_decode(jpg)
+        if img is None:
+            return []
+        out: list[tuple[str, bytes]] = []
+        for p in persons:
+            kpt = p.get("kpt")
+            if kpt is None:
+                continue
+            for hb in gestures.hand_boxes(kpt, kpt_conf=kpt_conf):
+                crop = self._crop(img, hb["box"])
+                if crop is None or max(crop.shape[:2]) < 34:
+                    continue
+                ok, buf = cv2.imencode(".jpg", crop)
+                if ok:
+                    out.append((hb["arm"], buf.tobytes()))
+        return out
+
+    def analyze_gestures(self, jpg: bytes,
+                         enrolled: dict[str, "np.ndarray"] | None = None,
+                         threshold: float = 0.80,
+                         kpt_conf: float = 0.3) -> dict[str, Any]:
+        """Полный анализ кадра для НАСТРАИВАЕМЫХ жестов.
+
+        enrolled — {gesture_id: матрица прототипов (n, 512)} для hand-жестов
+        выбранного лица (или None — только pose-правила).
+
+        Возвращает:
+          {"available": bool, "persons": int,
+           "pose": [id...],                       # геометрические жесты
+           "hand_scores": {id: score},            # лучший CLIP-скор по кистям
+           "hands": [id...],                      # hand-жесты >= threshold
+           "boxes": [(x1,y1,x2,y2, arm)...]}      # найденные кропы кистей
+        """
+        res: dict[str, Any] = {"available": self._pose is not None, "persons": 0,
+                               "pose": [], "hand_scores": {}, "hands": [], "boxes": []}
+        if self._pose is None:
+            return res
+        persons = self.detect_poses(jpg, conf_th=0.35)
+        res["persons"] = len(persons)
+        if not persons:
+            return res
+
+        img: np.ndarray | None = None
+        need_img = bool(enrolled)
+        boxes_all: list[dict[str, Any]] = []
+        for p in persons:
+            kpt = p.get("kpt")
+            if kpt is None:
+                continue
+            hits, _det = gestures.pose_gestures(kpt, kpt_conf=kpt_conf)
+            res["pose"] = sorted(set(res["pose"]) | hits)
+            if need_img:
+                boxes_all.extend(gestures.hand_boxes(kpt, kpt_conf=kpt_conf))
+
+        if not (need_img and boxes_all):
+            return res
+        img = _jpeg_decode(jpg)
+        if img is None:
+            return res
+
+        for hb in boxes_all:
+            crop = self._crop(img, hb["box"])
+            if crop is None:
+                continue
+            h, w = crop.shape[:2]
+            if max(h, w) < 34:  # кисть слишком мелкая — матчинг недостоверный
+                continue
+            ok, buf = cv2.imencode(".jpg", crop)
+            if not ok:
+                continue
+            embeds = self.gesture_embedding(buf.tobytes(), n_views=4)
+            if not embeds:
+                continue
+            res["boxes"].append((*gestures.clamp_box(hb["box"], img.shape[1], img.shape[0]),
+                                 hb["arm"]))
+            for gid, protos in (enrolled or {}).items():
+                if protos is None or len(protos) == 0:
+                    continue
+                best = -1.0
+                for vec in embeds:
+                    v = np.asarray(vec, dtype=np.float32)
+                    s = float(np.max((protos / (np.linalg.norm(protos, axis=1, keepdims=True) + 1e-9))
+                                     @ (v / (np.linalg.norm(v) + 1e-9))))
+                    best = max(best, s)
+                res["hand_scores"][gid] = max(float(res["hand_scores"].get(gid, -1.0)), best)
+        res["hands"] = sorted(g for g, s in res["hand_scores"].items() if s >= float(threshold))
+        return res

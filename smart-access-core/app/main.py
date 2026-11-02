@@ -27,6 +27,7 @@ from aiohttp import web
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import config as cfg        # noqa: E402
+from app import gestures as gest_lib  # noqa: E402
 from app import ha_api               # noqa: E402
 from app.brain import Brain          # noqa: E402
 from app.frigate_config import build_frigate_config  # noqa: E402
@@ -49,16 +50,24 @@ async def main() -> None:
     store = Store()
     models_ = Models()
 
-    bridge = Bridge(fps=float(cfg.CONF.recognition.get("bridge_fps", 1.5)))
-    brain = Brain(store, models_, on_status=lambda: None)
+    # v1.3.0: мост — ЕДИНСТВЕННЫЙ получатель камер (включая камеры с rtsp_url:
+    # мост сам читает RTSP и раздаёт кадры Frigate и HA — клиентов камеры: 1)
+    bridge = Bridge(
+        fps=float(cfg.CONF.recognition.get("bridge_fps", 1.5)),
+        stream_fps=float(cfg.CONF.recognition.get("stream_fps", 5.0)),
+    )
+    brain = Brain(store, models_, on_status=lambda: None, bridge=bridge)
 
     # --------- начальная настройка камер ---------
     def apply_cameras() -> None:
-        # камеры с rtsp_url идут во Frigate напрямую — мост для них не нужен
+        # v1.3.0: в мост входят ВСЕ камеры. rtsp_url — теперь источник кадра
+        # для моста (мост сам читает камеру), а не «обход моста» для Frigate:
+        # у камеры остаётся ОДИН клиент.
         cams = [
-            {"name": c["name"], "ha_entity": c.get("ha_entity", "")}
+            {"name": c["name"],
+             "ha_entity": c.get("ha_entity", ""),
+             "rtsp_url": (c.get("rtsp_url") or "").strip()}
             for c in cfg.CONF.cameras
-            if not (c.get("rtsp_url") or "").strip()
         ]
         bridge.set_cameras(cams)
 
@@ -119,13 +128,15 @@ async def main() -> None:
                 c["name"]: {
                     "entity": c.get("ha_entity"),
                     "display": c.get("display_name") or "",
-                    "direct": bool((c.get("rtsp_url") or "").strip()),
-                    "url": (c.get("rtsp_url") or "").strip() or bridge.frigate_url(c["name"]),
+                    # v1.3.0: rtsp_url — источник моста, Frigate всегда читает мост
+                    "direct": False,
+                    "url": bridge.frigate_url(c["name"]),
                     "failures": bridge.failures.get(c["name"], 0),
                     "clients": bridge.clients.get(c["name"], 0),
                     "fps": bridge.fps.get(c["name"], 0.0),
                     "frames": bridge.frames.get(c["name"], 0),
-                    # v1.2.1: КАК получен кадр, ПОЧЕМУ его нет и что делать
+                    # v1.3.0: РЕЖИМ получателя камеры: rtsp|proxy|stream|''
+                    "mode": bridge.mode.get(c["name"], ""),
                     "source": bridge.source.get(c["name"], ""),
                     "error": bridge.last_error.get(c["name"], ""),
                     "hint": bridge.hint(c["name"]),
@@ -137,8 +148,8 @@ async def main() -> None:
                 "enabled": bool((conf.gestures or {}).get("enabled")),
                 "model": models_.status.get("pose", "?"),
                 "available": models_.gestures_ok,
-                "confirm": "одна рука вверх",
-                "alarm_gesture": "обе руки вверх",
+                "threshold": float((conf.gestures or {}).get("threshold", 0.80)),
+                "configured": len(store.gestures_configured_subjects()),
             },
             "alarm": {
                 "enabled": bool((conf.alarm or {}).get("enabled")),
@@ -179,6 +190,148 @@ async def main() -> None:
             "cars": store.subjects("car"),
             "faces": store.subjects("face"),
         })
+
+    # ---------------- настраиваемые жесты (v1.3.0) ----------------
+
+    async def handle_gestures(_req: web.Request) -> web.Response:
+        """Каталог жестов + привязка к лицам + статус обучения."""
+        conf = cfg.CONF
+        faces = store.subjects("face")
+        subjects: dict[str, dict] = {}
+        for name in faces:
+            gcfg = store.get_subject_gestures(name)
+            subjects[name] = {
+                **gcfg,
+                "enrolled": store.gesture_info(name),
+                "configured": bool(gcfg.get("confirm") or gcfg.get("alarm")),
+            }
+        return web.json_response({
+            "available": models_.gestures_ok,
+            "model": models_.status.get("pose", "?"),
+            "enabled": bool((conf.gestures or {}).get("enabled")),
+            "threshold": float((conf.gestures or {}).get("threshold", 0.80)),
+            "defaults": {
+                "confirm": gest_lib.gesture_list_safe((conf.gestures or {}).get("default_confirm"), ["one_hand_up"]),
+                "alarm": gest_lib.gesture_list_safe((conf.gestures or {}).get("default_alarm"), ["both_hands_up"]),
+            },
+            "catalog": [{"id": gid, **meta} for gid, meta in gest_lib.GESTURES.items()],
+            "subjects": subjects,
+        })
+
+    async def handle_gestures_config(req: web.Request) -> web.Response:
+        """Привязка жестов к лицу: {subject, confirm: [gid], alarm: [gid]}."""
+        body = await req.json()
+        subject = str(body.get("subject") or "").strip()
+        if not subject:
+            return web.json_response({"ok": False, "error": "нужен subject"}, status=400)
+        if subject not in store.faces:
+            return web.json_response({"ok": False, "error": f"лицо «{subject}» не найдено — сначала обучите его во вкладке «Лица»"}, status=400)
+        def _ids(v) -> list[str]:
+            if isinstance(v, str):
+                v = [x.strip() for x in v.split(",") if x.strip()]
+            return [str(x).strip() for x in (v or []) if gest_lib.is_valid_gesture(str(x).strip())]
+        confirm, alarm = _ids(body.get("confirm")), _ids(body.get("alarm"))
+        dup = set(confirm) & set(alarm)
+        if dup:
+            return web.json_response(
+                {"ok": False, "error": f"жест не может быть и подтверждением, и тревогой: {', '.join(sorted(dup))}"},
+                status=400)
+        store.set_subject_gestures(subject, confirm, alarm)
+        brain.publish_status()
+        return web.json_response({"ok": True, "confirm": confirm, "alarm": alarm})
+
+    async def handle_gestures_enroll(req: web.Request) -> web.Response:
+        """Обучение hand-жеста фото: multipart (subject, gesture, photo[])."""
+        reader = await req.multipart()
+        subject, gesture, jpgs = "", "", []
+        try:
+            async for part in reader:
+                if part.name == "subject":
+                    subject = (await part.text()).strip()
+                elif part.name == "gesture":
+                    gesture = (await part.text()).strip()
+                elif part.name == "photo":
+                    jpgs.append(await part.read(decode=False))
+        except ValueError:
+            pass
+        if not subject or not gesture or not jpgs:
+            return web.json_response({"ok": False, "error": "нужны subject, gesture и photo"}, status=400)
+        if subject not in store.faces:
+            return web.json_response({"ok": False, "error": f"лицо «{subject}» не найдено — сначала обучите его во вкладке «Лица»"}, status=400)
+        added, crops, errors = 0, 0, []
+        for jpg in jpgs:
+            r = await loop.run_in_executor(None, brain.enroll_gesture, subject, gesture, jpg)
+            if r.get("ok"):
+                added += int(r.get("added") or 0)
+                crops += int(r.get("crops") or 0)
+            else:
+                errors.append(str(r.get("error") or "ошибка"))
+        return web.json_response({
+            "ok": added > 0,
+            "added": added, "crops": crops, "files": len(jpgs), "errors": errors,
+        })
+
+    async def handle_gestures_photos(req: web.Request) -> web.Response:
+        q = req.rel_url.query
+        subject, gesture = (q.get("subject") or "").strip(), (q.get("gesture") or "").strip()
+        if not subject or not gesture:
+            return web.json_response({"ok": False, "error": "нужны subject и gesture"}, status=400)
+        try:
+            return web.json_response({"ok": True,
+                                      "photos": store.list_gesture_photos(subject, gesture)})
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+    async def handle_gestures_photo(req: web.Request) -> web.Response:
+        p = store.gesture_photo_path(req.match_info.get("subject", ""),
+                                     req.match_info.get("gesture", ""),
+                                     req.match_info.get("file", ""))
+        if p is None:
+            return web.json_response({"ok": False, "error": "фото не найдено"}, status=404)
+        return web.FileResponse(p)
+
+    async def handle_gestures_photos_delete(req: web.Request) -> web.Response:
+        """Удаление кропов кисти + пересчёт прототипов по оставшимся."""
+        body = await req.json()
+        subject = str(body.get("subject") or "")
+        gesture = str(body.get("gesture") or "")
+        files = body.get("files") or []
+        if not subject or not gesture or not files:
+            return web.json_response({"ok": False, "error": "нужны subject, gesture, files[]"}, status=400)
+        try:
+            deleted = store.delete_gesture_photos(subject, gesture, files)
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        r = await loop.run_in_executor(None, brain.retrain_gesture, subject, gesture)
+        return web.json_response({"ok": True, "deleted": deleted,
+                                  "protos": int(r.get("added") or 0)})
+
+    async def handle_gestures_test(req: web.Request) -> web.Response:
+        """Проверка: какие жесты лица видны на кадре (multipart: subject, photo)."""
+        reader = await req.multipart()
+        subject, jpg = "", None
+        try:
+            async for part in reader:
+                if part.name == "subject":
+                    subject = (await part.text()).strip()
+                elif part.name == "photo":
+                    jpg = await part.read(decode=False)
+        except ValueError:
+            pass
+        if jpg is None:
+            return web.json_response({"ok": False, "error": "нужно фото"}, status=400)
+        r = await loop.run_in_executor(None, brain.test_gesture, subject, jpg)
+        return web.json_response(r)
+
+    async def handle_camera_snapshot(req: web.Request) -> web.Response:
+        """Кадр камеры HA: /api/camera_snapshot?entity=camera.x — для обучения жестов."""
+        entity = (req.rel_url.query.get("entity") or "").strip()
+        if not entity:
+            return web.json_response({"ok": False, "error": "нужен entity"}, status=400)
+        jpg = await loop.run_in_executor(None, lambda: ha_api.get_camera_image_ex(entity)[0])
+        if not jpg:
+            return web.json_response({"ok": False, "error": "кадр недоступен"}, status=502)
+        return web.Response(body=jpg, content_type="image/jpeg")
 
     async def handle_subject_delete(req: web.Request) -> web.Response:
         body = await req.json()
@@ -365,6 +518,14 @@ async def main() -> None:
     app.router.add_get("/api/subjects", handle_subjects)
     app.router.add_post("/api/subjects/delete", handle_subject_delete)
     app.router.add_post("/api/enroll", handle_enroll)
+    app.router.add_get("/api/gestures", handle_gestures)
+    app.router.add_post("/api/gestures/config", handle_gestures_config)
+    app.router.add_post("/api/gestures/enroll", handle_gestures_enroll)
+    app.router.add_get("/api/gestures/photos", handle_gestures_photos)
+    app.router.add_get("/api/gestures/photo/{subject}/{gesture}/{file}", handle_gestures_photo)
+    app.router.add_post("/api/gestures/photos/delete", handle_gestures_photos_delete)
+    app.router.add_post("/api/gestures/test", handle_gestures_test)
+    app.router.add_get("/api/camera_snapshot", handle_camera_snapshot)
     app.router.add_get("/api/events", handle_events)
     app.router.add_post("/api/events/archive", handle_events_archive)
     app.router.add_post("/api/events/clear", handle_events_clear)

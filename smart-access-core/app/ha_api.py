@@ -65,7 +65,7 @@ def _short_exc(exc: BaseException, limit: int = 120) -> str:
     return (s[:limit] + "…") if len(s) > limit else (s or exc.__class__.__name__)
 
 
-def _first_jpeg(buf: bytes) -> bytes | None:
+def first_jpeg(buf: bytes) -> bytes | None:
     """Первый ПОЛНЫЙ JPEG (маркеры SOI…EOI) в буфере; None, если он ещё не целиком.
 
     В MJPEG-потоках энтропийные данные не содержат 0xFFD9 (байтовое
@@ -78,6 +78,10 @@ def _first_jpeg(buf: bytes) -> bytes | None:
     if eoi < 0:
         return None
     return buf[soi:eoi + 2]
+
+
+# Совместимость со старым внутренним именем
+_first_jpeg = first_jpeg
 
 
 # Троттлинг WARNING о сбоях камер. Раньше причины писались на DEBUG и в
@@ -145,6 +149,66 @@ def get_camera_stream_frame(entity_id: str, timeout: float = 12.0,
     finally:
         resp.close()
     return None, "таймаут ожидания кадра из потока HA"
+
+
+def get_camera_snapshot_ex(entity_id: str, timeout: int = 8) -> tuple[bytes | None, str]:
+    """ТОЛЬКО одиночный снимок (camera_proxy): (jpeg|None, причина_отказа).
+
+    v1.3.0: мост решает по нему, умеет ли камера дешёвые снимки (режим
+    «proxy» — nginx still_image_url, ЕГДС, облачные snapshot-API), или ей
+    нужен постоянный поток (режим «stream»). В отличие от
+    get_camera_image_ex НЕ тянет поток запасным путём: для камеры-«потока»
+    каждый такой «снимок» — целая сессия, и именно они топили камеры.
+    Никогда не бросает.
+    """
+    if not cfg.SUPERVISOR_TOKEN:
+        return None, "нет SUPERVISOR_TOKEN"
+    try:
+        resp = requests.get(
+            f"{cfg.supervisor_base()}/core/api/camera_proxy/{entity_id}",
+            headers=_headers(),
+            timeout=timeout,
+        )
+        if resp.ok and resp.content[:3] == b"\xff\xd8\xff":
+            return resp.content, ""
+        err = (f"camera_proxy HTTP {resp.status_code} "
+               f"({resp.headers.get('content-type', '?')})")
+        if not resp.ok and resp.content:
+            err += f": {resp.content[:120]!r}"
+        elif resp.ok:
+            err += ": тело не JPEG"
+        return None, err
+    except requests.RequestException as exc:
+        return None, f"camera_proxy недоступна: {_short_exc(exc)}"
+
+
+def open_camera_stream(entity_id: str):
+    """Открыть ПОСТОЯННОЕ соединение к потоку HA (для моста, v1.3.0).
+
+    Возвращает открытый streaming-ответ (multipart-MJPEG) или None.
+    Один вызов = ОДНА сессия HA↔камера (как открытая карточка): кадры
+    разбирает мост, соединение не рвётся между кадрами — вместо старого
+    «открыл поток ради одного кадра и закрыл» на каждый опрос.
+    Ошибки — в журнал с троттлингом 60 с.
+    """
+    if not cfg.SUPERVISOR_TOKEN:
+        _warn_throttled(entity_id, "нет SUPERVISOR_TOKEN — поток HA недоступен")
+        return None
+    try:
+        resp = requests.get(
+            f"{cfg.supervisor_base()}/core/api/camera_proxy_stream/{entity_id}",
+            headers=_headers(), stream=True, timeout=(5, 30),
+        )
+    except requests.RequestException as exc:
+        _warn_throttled(entity_id, f"поток HA недоступен: {_short_exc(exc)}")
+        return None
+    if not resp.ok:
+        ctype = resp.headers.get("content-type", "?")
+        _warn_throttled(entity_id,
+                        f"поток HA: HTTP {resp.status_code} ({ctype})")
+        resp.close()
+        return None
+    return resp
 
 
 def get_camera_image_ex(entity_id: str, timeout: int = 12) -> tuple[bytes | None, str, str]:

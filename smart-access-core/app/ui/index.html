@@ -61,6 +61,12 @@
   .tabpane { display:none; } .tabpane.active { display:block; }
   .num { font-variant-numeric: tabular-nums; }
   .hint { font-size:12px; color:#66707a; line-height:1.5; margin:6px 0; }
+  .gchips { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0; }
+  .gchip { display:inline-flex; align-items:center; gap:5px; border:1px solid var(--line);
+           border-radius:16px; padding:4px 10px; font-size:12.5px; cursor:pointer; background:#fafbfc; }
+  .gchip:hover { background:#eef3f8; }
+  .gchip-hand { border-style:dashed; }
+  .gchip input { margin:0; }
 </style>
 </head>
 <body>
@@ -85,6 +91,10 @@
       <h2>Состояние</h2>
       <div id="status" class="muted">загрузка…</div>
     </div>
+    <div class="card">
+      <h2>Один получатель на камеру (v1.3.0)</h2>
+      <div id="clientHint" class="muted">загрузка…</div>
+    </div>
   </div>
 
   <!-- ============ МАШИНЫ / ЛИЦА ============ -->
@@ -94,19 +104,36 @@
   <!-- ============ ЖЕСТЫ И ТРЕВОГА ============ -->
   <div class="tabpane" id="pane-gestures">
     <div class="card">
-      <h2>Жесты</h2>
+      <h2>Жесты — настраиваются для каждого лица</h2>
       <div class="switch">
         <input type="checkbox" id="gestEnabled" onchange="saveSetting('gestures_enabled', this.checked)">
         <label for="gestEnabled"><b>Подтверждение открытия жестом</b></label>
       </div>
       <p class="hint">
-        Когда человек подходит к калитке и лицо распознано как «своё», открытие происходит
-        только после <b>жеста-подтверждения — одна рука поднята вверх</b>.
-        Если обе руки подняты вверх — это <b>жест-тревога</b>: калитка откроется и одновременно
-        будет отправлен инцидент (звонок на тревожные номера + уведомление в Home Assistant).
-        Жесты выключаются этим переключателем (не нужно менять настройки аддона).
+        Жесты больше не жёстко заданы. Для каждого лица вы сами выбираете
+        <b>жест-подтверждение</b> (калитка откроется, только когда лицо распознано
+        и жест показан) и, при желании, <b>тревожный жест</b> (калитка открывается
+        И одновременно звонит тревога — незаметный сигнал «меня держат»).
+        Выбирайте обычные жесты, не привлекающие внимания: коснуться носа или уха,
+        знак V или OK, палец вверх/вниз — можно показать одной рукой с сумками
+        в другой или когда сзади стоит посторонний.
       </p>
       <div id="gestStatus" class="muted">…</div>
+      <div id="gestList" style="margin-top:10px">загрузка…</div>
+    </div>
+    <div class="card">
+      <h2>Проверка жеста на кадре</h2>
+      <p class="hint">Загрузите фото или снимите кадр с камеры — панель покажет, какие
+      из настроенных жестов лица она видит и с какими оценками. Так проверяют и
+      обучение (фото кисти), и срабатывание.</p>
+      <div class="row">
+        <select id="gtSubject"></select>
+        <select id="gtCamera"></select>
+        <input type="file" id="gtFile" accept="image/*">
+        <button onclick="gestureTestFile()">Проверить фото</button>
+        <button class="ghost" onclick="gestureTestCamera()">Снять с камеры и проверить</button>
+      </div>
+      <div id="gtResult" style="margin-top:8px"></div>
     </div>
     <div class="card">
       <h2>Тревожные номера (SIP-звонок через ha-sip)</h2>
@@ -212,7 +239,7 @@ document.getElementById('tabs').addEventListener('click', (e) => {
   if (b.dataset.t === 'cars') renderSubjectsPane('car');
   if (b.dataset.t === 'faces') renderSubjectsPane('face');
   if (b.dataset.t === 'journal') loadJournal();
-  if (b.dataset.t === 'gestures') refreshSettings();
+  if (b.dataset.t === 'gestures') { refreshSettings(); loadGestures(); }
 });
 
 /* ---------- статус ---------- */
@@ -225,12 +252,17 @@ async function refresh() {
     $('masterBtn').textContent = st.master_enable ? 'Авто-допуск: ВКЛ' : 'Авто-допуск: ВЫКЛ';
     $('masterBtn').className = st.master_enable ? 'green' : 'orange';
     const rows = Object.entries(st.bridge||{}).map(([n,c]) => {
-      // v1.2.1: источник кадра + строка-подсказка, когда мост не получает кадры
-      const src = c.source === 'stream' ? ' <span class="pill warn">кадр из потока HA</span>' : '';
+      // v1.3.0: РЕЖИМ получателя камеры (у камеры один клиент — мост)
+      const pill = (cls, txt) => ` <span class="pill ${cls}">${txt}</span>`;
+      let src = '';
+      if (c.source === 'rtsp') src = pill('ok', 'RTSP: мост читает сам');
+      else if (c.source === 'stream') src = pill('', 'поток HA · одна сессия');
+      else if (c.source === 'proxy') src = pill('ok', 'снимки');
+      else src = pill('warn', 'подключение…');
       const hint = c.hint
         ? `<tr><td colspan="4"><div class="frigate-warn">⚠ ${esc(c.hint)}${c.error?` <span class="muted">Последняя ошибка: ${esc(c.error)}</span>`:''}</div></td></tr>`
         : '';
-      return `<tr><td><b>${n}</b>${c.display&&c.display!==n?` <span class="muted">(${esc(c.display)})</span>`:''}</td><td>${esc(c.entity)}</td><td><span class="pill ${c.failures>5?'err':'ok'}">сбоев: ${c.failures}</span>${c.direct?'':` <span class="pill ${c.fps>0?'ok':''}">fps: ${c.fps||0}</span>`}${src}</td><td>${c.direct?'<b>прямой RTSP</b> (без моста)':esc(c.url)}</td></tr>${hint}`;
+      return `<tr><td><b>${n}</b>${c.display&&c.display!==n?` <span class="muted">(${esc(c.display)})</span>`:''}</td><td>${esc(c.entity||'—')}</td><td><span class="pill ${c.failures>5?'err':'ok'}">сбоев: ${c.failures}</span> <span class="pill ${c.fps>0?'ok':''}">fps: ${c.fps||0}</span>${src}</td><td>${esc(c.url)}</td></tr>${hint}`;
     }).join('');
     const re = st.retrain || {};
     const reHtml = re.running
@@ -254,6 +286,22 @@ async function refresh() {
     const cur = sel.value;
     sel.innerHTML = '<option value="">все камеры</option>' + Object.keys(st.bridge||{}).map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
     sel.value = cur;
+    // v1.3.0: подсказка «один получатель»: как переключить карточки HA на мост
+    const hc = Object.values(st.bridge||{}).filter(c=>c.url);
+    $('clientHint').innerHTML = hc.length ? `
+      <p>У каждой камеры — <b>один получатель</b>: мост Smart Access (режимы:
+      <span class="pill ok">снимки</span> — быстрые одиночные снимки;
+      <span class="pill">поток HA · одна сессия</span> — одно постоянное соединение вместо
+      опроса; <span class="pill ok">RTSP: мост читает сам</span>). Чтобы HA не открывал
+      к камере вторую сессию, карточку камеры переключите на мост —
+      <b>Настройки → Устройства и службы → Универсальная камера</b> (у камеры из
+      интеграций выключите её поток в карточке):</p>
+      <table><tr><th>Камера</th><th>URL потока для карточки HA</th></tr>
+      ${hc.map(c=>`<tr><td><b>${esc(c.display||c.entity||'')}</b></td><td><code>${esc(c.url)}</code></td></tr>`).join('')}
+      </table>
+      <p class="muted">Для локальной камеры лучший вариант — впишите ей <b>rtsp_url</b> в
+      настройках аддона: мост сам прочитает RTSP (полный fps) и раздаст всем.</p>`
+      : '<p class="muted">камеры не настроены</p>';
   } catch(e) { $('status').textContent = 'ошибка загрузки статуса: ' + (e && e.message ? e.message : e); }
 }
 
@@ -269,7 +317,12 @@ const KINDS = { car: {title:'Машины («свои» на шлагбаум)',
                 face: {title:'Лица (калитка/дверь)', hint:'Крупное фото лица анфас, можно несколько файлов сразу. Добавляйте 2–3 фото с разных ракурсов на человека.'} };
 
 async function renderSubjectsPane(kind) {
-  const pane = $('pane-' + kind);
+  // v1.3.0: id панелей — МНОЖЕСТВЕННЫЕ (pane-cars / pane-faces), а kind —
+  // единственное число ('car'/'face'). Раньше $('pane-' + kind) искала
+  // «pane-car», получала null и роняла рендер («pane is null» в консоли),
+  // из-за чего вкладки «Машины» и «Лица» оставались пустыми.
+  const pane = $('pane-' + kind + 's');
+  if (!pane) return;
   let map = {};
   try { map = (await (await fetch(API('api/subjects'))).json())[kind + 's'] || {}; } catch(e) {}
   const list = Object.entries(map).map(([name, info]) => {
@@ -339,7 +392,12 @@ async function openGallery(kind, subject) {
        <div class="fname">${esc(p.file)} · ${new Date(p.ts*1000).toLocaleString()}</div></div>`).join('')
     || '<span class="muted">фото нет — добавьте кнопкой «+ Добавить фото»</span>';
 }
-function closeGallery() { $('galleryModal').style.display = 'none'; if (GAL.kind) renderSubjectsPane(GAL.kind); }
+function closeGallery() {
+  $('galleryModal').style.display = 'none';
+  $('delSelBtn').dataset.mode = '';
+  if (GAL.kind) renderSubjectsPane(GAL.kind);
+  else loadGestures();
+}
 function toggleSel(file) {
   const el = $('ph_' + file.replace(/[^A-Za-z0-9_.-]/g, c => '_'));
   if (GAL.sel.has(file)) { GAL.sel.delete(file); el.classList.remove('sel'); }
@@ -357,6 +415,8 @@ async function addPhotos(input) {
   openGallery(GAL.kind, GAL.subject);
 }
 async function deleteSelected() {
+  // модалка общая: фото лиц/машин или кропы кисти (жесты)
+  if ($('delSelBtn').dataset.mode === 'gesture') { await deleteSelectedGesture(); return; }
   if (!GAL.sel.size) return;
   if (!confirm(`Удалить выбранные фото (${GAL.sel.size}) и переобучить «${GAL.subject}»?`)) return;
   const r = await (await fetch(API('api/photos/delete'), {method:'POST', headers:{'Content-Type':'application/json'},
@@ -368,22 +428,226 @@ function retrainCurrent() {
   if (GAL.kind) retrainSubject(GAL.kind, GAL.subject);
 }
 
-/* ---------- жесты и тревога ---------- */
+/* ---------- жесты: каталог, настройка по лицам, обучение (v1.3.0) ---------- */
+let GEST = {catalog: [], subjects: {}, defaults: {confirm: [], alarm: []}, cameras: []};
+
 async function refreshSettings() {
   try {
     const st = CUR_STATUS || await (await fetch(API('api/status'))).json();
     $('gestEnabled').checked = !!st.gestures.enabled;
     $('alarmEnabled').checked = !!st.alarm.enabled;
     $('gestStatus').innerHTML = st.gestures.available
-      ? `Модель жестов: <span class="pill ok">ok</span> · подтверждение: ${esc(st.gestures.confirm)} · тревога: ${esc(st.gestures.alarm_gesture)}`
+      ? `Модель жестов: <span class="pill ok">ok</span> · порог CLIP-матчинга: <b>${st.gestures.threshold ?? 0.8}</b>
+         · лиц с настроенными жестами: <b>${st.gestures.configured ?? 0}</b>`
       : `Модель жестов: <span class="pill err">${esc(st.gestures.model)}</span> — жесты недоступны`;
     const a = st.alarm;
     $('alarmInfo').innerHTML =
       `Аддон SIP: <b>${esc(a.addon || 'не задан')}</b> · номеров: <b>${(a.numbers||[]).length}</b>${(a.numbers||[]).length?': '+a.numbers.map(n=>`<code>${esc(n)}</code>`).join(' '):''}
        · гудков: ${esc(a.ring_timeout||15)} с<br>Текст звонка: «${esc(a.message_template)}»
        <br><span class="muted">Плейсхолдеры: {name} — имя, {camera} — камера, {time} — ЧЧ:ММ, {date} — дата. Озвучка — TTS-движком HA (Piper).</span>`;
+    // камеры для «снять с камеры» (кадр через HA API)
+    GEST.cameras = Object.entries(st.bridge || {})
+      .filter(([, c]) => c.entity).map(([n, c]) => ({name: n, entity: c.entity}));
+    const gtCam = $('gtCamera');
+    const curCam = gtCam.value;
+    gtCam.innerHTML = GEST.cameras.map(c => `<option value="${esc(c.entity)}">${esc(c.name)}</option>`).join('')
+      || '<option value="">камеры моста недоступны</option>';
+    if (curCam) gtCam.value = curCam;
   } catch(e) {}
 }
+
+async function loadGestures() {
+  try {
+    GEST = {...GEST, ...(await (await fetch(API('api/gestures'))).json())};
+    renderGesturePane();
+    const sel = $('gtSubject');
+    const cur = sel.value;
+    const names = Object.keys(GEST.subjects);
+    sel.innerHTML = names.length
+      ? names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')
+      : '<option value="">(сначала обучите лицо во вкладке «Лица»)</option>';
+    if (cur && names.includes(cur)) sel.value = cur;
+  } catch(e) { $('gestList').textContent = 'ошибка загрузки: ' + (e && e.message ? e.message : e); }
+}
+
+function gestChip(sIdx, gid, role, checked, type) {
+  const meta = GEST.catalog.find(g => g.id === gid) || {};
+  return `<label class="gchip ${type === 'hand' ? 'gchip-hand' : ''}" title="${esc(meta.hint || '')}">
+    <input type="checkbox" data-s="${sIdx}" data-g="${esc(gid)}" data-role="${role}" ${checked ? 'checked' : ''}>
+    ${esc(meta.label || gid)}${type === 'hand' ? ' <span class="muted">*</span>' : ''}</label>`;
+}
+
+function renderGesturePane() {
+  const names = Object.keys(GEST.subjects);
+  if (!names.length) {
+    $('gestList').innerHTML = '<p class="muted">Сначала обучите лица во вкладке «Лица», затем вернитесь сюда и назначьте каждому свои жесты.</p>';
+    return;
+  }
+  const rows = names.map((name, i) => {
+    const s = GEST.subjects[name];
+    const inC = gid => (s.confirm || []).includes(gid);
+    const inA = gid => (s.alarm || []).includes(gid);
+    const chips = role => GEST.catalog.map(g => gestChip(i, g.id, role, role === 'confirm' ? inC(g.id) : inA(g.id), g.type)).join('');
+    const warn = s.configured ? '' :
+      `<div class="frigate-warn" style="margin:6px 0">Лицо не настроено — работает старое правило
+       («${GEST.defaults.confirm.map(id => (GEST.catalog.find(g => g.id === id) || {}).label || id).join(', ') || '—'}» — подтверждение,
+       «${GEST.defaults.alarm.map(id => (GEST.catalog.find(g => g.id === id) || {}).label || id).join(', ') || '—'}» — тревога).</div>`;
+    const handSelected = GEST.catalog.filter(g => g.type === 'hand' && (inC(g.id) || inA(g.id)));
+    const enroll = handSelected.map(g => {
+      const info = (s.enrolled || {})[g.id] || {photos: 0, embeds: 0};
+      const okPill = info.embeds > 0 ? '<span class="pill ok">обучен</span>' : '<span class="pill warn">не обучен</span>';
+      return `<div class="row" style="margin:4px 0">
+        <b>${esc(g.label)}</b> ${okPill}
+        <span class="muted">фото: ${info.photos} · прототипов: ${info.embeds}</span>
+        <label class="button small" style="background:var(--acc);color:#fff;padding:5px 10px;border-radius:8px;cursor:pointer">
+          + фото<input type="file" accept="image/*" multiple style="display:none"
+            onchange="gestureEnrollFiles(${i},'${escQ(g.id)}',this)"></label>
+        <button class="small" onclick="gestureEnrollCamera(${i},'${escQ(g.id)}')">Кадр с камеры</button>
+        <button class="small ghost" onclick="openGestureGallery(${i},'${escQ(g.id)}')">Фото кисти</button>
+      </div>`;
+    }).join('');
+    return `<div class="subj" style="align-items:flex-start">
+      <div style="flex:1;min-width:260px">
+        <div class="name">${esc(name)}</div>${warn}
+        <div class="muted" style="margin-top:6px">Жест-подтверждение (откроет калитку):</div>
+        <div class="gchips">${chips('confirm')}</div>
+        <div class="muted" style="margin-top:6px">Тревожный жест (откроет И позвонит — незаметное «держат»):</div>
+        <div class="gchips">${chips('alarm')}</div>
+        <div class="row" style="margin-top:8px">
+          <button class="small green" onclick="saveGestures(${i})">Сохранить жесты</button>
+          <span class="muted"><span class="muted">*</span> — жест кисти: нужно обучение фото (показал камере — обучил, как лицо)</span>
+        </div>
+        ${enroll ? `<div style="margin-top:6px;border-top:1px dashed var(--line);padding-top:6px">
+          <div class="muted">Обучение жестов кисти (1–3 кадра с той же камеры; держите вторую руку вне кадра):</div>${enroll}</div>` : ''}
+      </div></div>`;
+  }).join('');
+  $('gestList').innerHTML = rows;
+}
+
+function collectGestures(i) {
+  const name = Object.keys(GEST.subjects)[i];
+  const out = {confirm: [], alarm: []};
+  document.querySelectorAll(`#gestList input[type=checkbox][data-s="${i}"]`).forEach(cb => {
+    if (cb.checked && out[cb.dataset.role]) out[cb.dataset.role].push(cb.dataset.g);
+  });
+  return {name, ...out};
+}
+
+async function saveGestures(i) {
+  const {name, confirm, alarm} = collectGestures(i);
+  const dup = confirm.filter(g => alarm.includes(g));
+  if (dup.length) { alert('Один жест не может быть и подтверждением, и тревогой: ' + dup.join(', ')); return; }
+  const r = await (await fetch(API('api/gestures/config'), {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({subject: name, confirm, alarm})})).json();
+  if (!r.ok) { alert(r.error || 'ошибка'); return; }
+  await loadGestures();
+}
+
+async function gestureEnrollFiles(i, gid, input) {
+  if (!input.files.length) return;
+  await gestureEnrollUpload(i, gid, input.files);
+  input.value = '';
+}
+
+async function gestureEnrollCamera(i, gid) {
+  const entity = $('gtCamera').value;
+  if (!entity) { alert('Выберите камеру в разделе «Проверка жеста» или используйте загрузку фото'); return; }
+  try {
+    const blob = await (await fetch(API('api/camera_snapshot?entity=' + encodeURIComponent(entity)))).blob();
+    await gestureEnrollUpload(i, gid, [blob]);
+  } catch(e) { alert('Кадр с камеры недоступен: ' + (e && e.message ? e.message : e)); }
+}
+
+async function gestureEnrollUpload(i, gid, files) {
+  const name = Object.keys(GEST.subjects)[i];
+  const fd = new FormData();
+  fd.append('subject', name); fd.append('gesture', gid);
+  for (const f of files) fd.append('photo', f);
+  const r = await (await fetch(API('api/gestures/enroll'), {method: 'POST', body: fd})).json();
+  const errs = r.errors && r.errors.length ? '\nОшибки: ' + r.errors.join('; ') : '';
+  alert(r.ok
+    ? `Жест обучен: +${r.added} прототипов из ${r.crops} кропов кисти${errs}`
+    : 'Ошибка: ' + (r.errors || ['нет ответа']).join('; '));
+  await loadGestures();
+}
+
+/* галерея кропов кисти */
+let GGAL = {subject: null, gesture: null, photos: [], sel: new Set()};
+
+async function openGestureGallery(i, gid) {
+  GGAL = {subject: Object.keys(GEST.subjects)[i], gesture: gid, photos: [], sel: new Set()};
+  $('galleryTitle').textContent = `Фото кисти: ${GGAL.subject} — ${(GEST.catalog.find(g => g.id === gid) || {}).label || gid}`;
+  $('delSelBtn').dataset.mode = 'gesture';
+  $('galleryModal').style.display = 'block';
+  $('galleryGrid').innerHTML = '<span class="muted">загрузка…</span>';
+  const r = await (await fetch(API(`api/gestures/photos?subject=${encodeURIComponent(GGAL.subject)}&gesture=${encodeURIComponent(GGAL.gesture)}`))).json();
+  GGAL.photos = r.photos || [];
+  $('delSelBtn').disabled = true;
+  $('galleryGrid').innerHTML = GGAL.photos.map(p =>
+    `<div class="ph" id="ph_${esc(p.file)}" onclick="toggleGestureSel('${escQ(p.file)}')">
+       <img src="${API('api/gestures/photo/' + encodeURIComponent(GGAL.subject) + '/' + encodeURIComponent(GGAL.gesture) + '/' + encodeURIComponent(p.file))}" alt="" loading="lazy">
+       <div class="fname">${esc(p.file)} · ${new Date(p.ts*1000).toLocaleString()}</div></div>`).join('')
+    || '<span class="muted">фото нет — обучите жест кнопками «+ фото» или «Кадр с камеры»</span>';
+}
+
+function toggleGestureSel(file) {
+  const el = $('ph_' + file.replace(/[^A-Za-z0-9_.-]/g, () => '_'));
+  if (GGAL.sel.has(file)) { GGAL.sel.delete(file); el.classList.remove('sel'); }
+  else { GGAL.sel.add(file); el.classList.add('sel'); }
+  $('delSelBtn').disabled = !GGAL.sel.size;
+}
+
+async function deleteSelectedGesture() {
+  if (!GGAL.sel.size) return;
+  if (!confirm(`Удалить выбранные кропы (${GGAL.sel.size}) и пересчитать прототипы?`)) return;
+  const r = await (await fetch(API('api/gestures/photos/delete'), {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({subject: GGAL.subject, gesture: GGAL.gesture, files: [...GGAL.sel]})})).json();
+  alert(r.ok ? `Удалено фото: ${r.deleted}, прототипов стало: ${r.protos}` : (r.error || 'ошибка'));
+  openGestureGallery(Object.keys(GEST.subjects).indexOf(GGAL.subject), GGAL.gesture);
+}
+
+/* проверка жеста на кадре */
+async function gestureTestUpload(blob, note) {
+  const subject = $('gtSubject').value;
+  const fd = new FormData();
+  fd.append('subject', subject); fd.append('photo', blob, 'frame.jpg');
+  $('gtResult').innerHTML = '<span class="muted">проверяю…</span>';
+  const r = await (await fetch(API('api/gestures/test'), {method: 'POST', body: fd})).json();
+  if (!r.ok) { $('gtResult').innerHTML = `<span class="pill err">модель жестов недоступна</span>`; return; }
+  const lab = g => esc((r.labels && r.labels[g]) || g);
+  const hits = [
+    ...r.hits_alarm.map(g => `<span class="pill alarm">ТРЕВОГА: ${lab(g)}</span>`),
+    ...r.hits_confirm.map(g => `<span class="pill ok">ПОДТВЕРЖДЕНИЕ: ${lab(g)}</span>`),
+  ].join(' ') || '<span class="pill warn">своих жестов не видно</span>';
+  const scores = Object.entries(r.hand_scores || {}).map(([g, s]) =>
+    `<span class="pill ${s >= r.threshold ? 'ok' : ''}">${lab(g)}: ${s}</span>`).join(' ') || '<span class="muted">кисти с кадром CLIP не сравнивались</span>';
+  const pose = (r.pose || []).map(lab).join(', ') || '—';
+  const miss = r.missing && r.missing.length
+    ? `<div class="frigate-warn" style="margin-top:6px">Не обучены жесты кисти: ${r.missing.map(lab).join(', ')} — покажите жест камере и нажмите «Кадр с камеры».</div>` : '';
+  $('gtResult').innerHTML =
+    `<div>${note ? `<span class="muted">${esc(note)} · </span>` : ''}людей в кадре: <b>${r.persons}</b>
+      · настроено у «${esc(subject)}»: ${r.configured ? 'да' : 'нет (старое правило)'} · порог: ${r.threshold}</div>
+     <div style="margin-top:4px">${hits}</div>
+     <div class="muted" style="margin-top:4px">pose-жесты в кадре: ${esc(pose)} · CLIP-оценки: ${scores}</div>${miss}`;
+}
+
+async function gestureTestFile() {
+  const f = $('gtFile').files[0];
+  if (!f) { alert('Выберите фото'); return; }
+  await gestureTestUpload(f, 'фото');
+}
+
+async function gestureTestCamera() {
+  const entity = $('gtCamera').value;
+  if (!entity) { alert('Нет доступных камер моста'); return; }
+  try {
+    const blob = await (await fetch(API('api/camera_snapshot?entity=' + encodeURIComponent(entity)))).blob();
+    await gestureTestUpload(blob, 'кадр с камеры');
+  } catch(e) { $('gtResult').textContent = 'Кадр с камеры недоступен: ' + (e && e.message ? e.message : e); }
+}
+
 async function saveSetting(key, value) {
   const r = await (await fetch(API('api/settings'), {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({[key]: value})})).json();
@@ -449,7 +713,7 @@ async function clearEvents() {
 /* ---------- конфиг frigate ---------- */
 async function loadFrigate() { $('frigateCfg').value = await (await fetch(API('api/frigate-config'))).text(); }
 
-refresh(); refreshSettings(); setInterval(refresh, 5000);
+refresh(); refreshSettings(); loadGestures(); setInterval(refresh, 5000);
 </script>
 </body>
 </html>

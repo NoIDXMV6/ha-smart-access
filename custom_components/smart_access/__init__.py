@@ -235,9 +235,13 @@ def _notify_alarm(hass: HomeAssistant, payload: dict) -> None:
     subject = payload.get("subject") or "неизвестный"
     camera = payload.get("camera") or "?"
     score = payload.get("score")
+    # v1.3.0: аддон присылает name жеста (поле gesture) — тревожных жестов
+    # теперь несколько (настраиваются по каждому лицу)
+    gesture = str(payload.get("gesture") or "").strip()
+    gtxt = f" ({gesture})" if gesture else ""
     text = (
         f"Человек, распознанный как «{subject}» (score={score}), открыл калитку на камере "
-        f"«{camera}» С ТРЕВОЖНЫМ ЖЕСТОМ (обе руки вверх). Возможна угроза — проверьте "
+        f"«{camera}» С ТРЕВОЖНЫМ ЖЕСТОМ{gtxt}. Возможна угроза — проверьте "
         f"видео и звонки. Звонок по тревожным номерам отправлен (если настроен)."
     )
     hass.async_create_task(hass.services.async_call(

@@ -18,6 +18,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 from aiohttp import web
@@ -46,10 +47,23 @@ def build_frigate_config(conf, bridge) -> str:
 
     Камеры с rtsp_url идут напрямую (TCP-транспорт — надёжнее для Hikvision),
     остальные — через MJPEG-мост аддона.
+
+    Особенности сети аддона Frigate (он НЕ host-network, а мост hassio):
+      * MQTT-брокер недоступен ему по localhost — только по имени аддона
+        `core-mosquitto` (или внешнему IP); localhost подменяем автоматически;
+      * наш MJPEG-мост слушает на хосте, из мостовой сети хост — это шлюз
+        172.30.32.1, поэтому в конфиг подставляется он, а не 127.0.0.1.
     """
     cams = [c for c in conf.cameras if c.get("mode", "off") != "off"]
-    mqtt_host = conf.mqtt.get("host") or "core-mosquitto"
+    mqtt_host = str(conf.mqtt.get("host") or "").strip()
+    if mqtt_host in ("", "localhost", "127.0.0.1", "::1"):
+        # для мостового аддона Frigate localhost — это он сам; брокер — соседний аддон
+        mqtt_host = "core-mosquitto"
     lines: list[str] = []
+    lines.append("# === Сгенерировано Smart Access Core ===")
+    lines.append("# Куда вставить: веб-интерфейс Frigate → Configuration → вставить → Save & Restart.")
+    lines.append("# NB: mqtt.host подставлен как core-mosquitto (аддон Frigate не видит localhost),")
+    lines.append("#     а мост камер — по адресу шлюза 172.30.32.1 (хост, где слушает Smart Access).")
     lines.append("mqtt:")
     lines.append(f"  host: {mqtt_host}")
     lines.append(f"  port: {int(conf.mqtt.get('port') or 1883)}")
@@ -82,7 +96,7 @@ def build_frigate_config(conf, bridge) -> str:
             lines.append(f"        - path: {rtsp}")
             lines.append("          input_args: preset-rtsp-tcp")
         else:
-            lines.append(f"        - path: {bridge.url(name)}")
+            lines.append(f"        - path: {bridge.frigate_url(name)}")
             lines.append("          input_args: -f mjpeg")
         lines.append("          roles:")
         lines.append("            - detect")
@@ -144,19 +158,31 @@ async def main() -> None:
     async def handle_index(_req: web.Request) -> web.Response:
         return web.FileResponse(UI_DIR / "index.html")
 
+    # кэш проверки Frigate: не блокируем event loop синхронным requests
+    # и не долбим Frigate на каждый опрос UI (обновление кэша 10 с)
+    probe_cache: dict = {"ts": 0.0, "res": {"ok": False, "error": "ещё не проверялся"}}
+
     async def handle_status(_req: web.Request) -> web.Response:
         conf = cfg.CONF
+        if time.time() - probe_cache["ts"] > 10:
+            probe_cache["res"] = await loop.run_in_executor(
+                None, ha_api.frigate_probe, conf.frigate_url
+            )
+            probe_cache["ts"] = time.time()
+        probe = probe_cache["res"]
         return web.json_response({
             "state": "ok" if (conf.master_enable and (models_.ok or models_.faces_ok)) else "degraded",
             "master_enable": conf.master_enable,
             "models": models_.status,
-            "frigate": ha_api.frigate_ping(conf.frigate_url),
+            "frigate": probe["ok"],
+            "frigate_url": conf.frigate_url,
+            "frigate_error": probe["error"],
             "mqtt_host": conf.mqtt.get("host") or "core-mosquitto",
             "bridge": {
                 c["name"]: {
                     "entity": c.get("ha_entity"),
                     "direct": bool((c.get("rtsp_url") or "").strip()),
-                    "url": (c.get("rtsp_url") or "").strip() or bridge.url(c["name"]),
+                    "url": (c.get("rtsp_url") or "").strip() or bridge.frigate_url(c["name"]),
                     "failures": bridge.failures.get(c["name"], 0),
                     "clients": bridge.clients.get(c["name"], 0),
                 }
@@ -172,6 +198,7 @@ async def main() -> None:
         cfg.reload_conf()
         apply_cameras()
         brain.publish_status()
+        probe_cache["ts"] = 0.0  # конфиг мог сменить frigate_url — проверить заново
         return web.json_response({"ok": True})
 
     async def handle_master(req: web.Request) -> web.Response:

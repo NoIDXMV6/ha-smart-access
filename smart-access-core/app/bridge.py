@@ -63,6 +63,16 @@ class Bridge:
     def url(self, name: str) -> str:
         return f"http://127.0.0.1:8100/mjpeg/{name}"
 
+    def frigate_url(self, name: str) -> str:
+        """Адрес потока С ТОЧКИ ЗРЕНИЯ Frigate.
+
+        Аддон Frigate работает в мостовой Docker-сети hassio (172.30.32.0/23),
+        поэтому 127.0.0.1 для него — его собственный контейнер. Аддон Smart
+        Access слушает на хосте (host_network), а хост из мостовой сети — это
+        шлюз 172.30.32.1 (константа Supervisor: DOCKER_IPV4_NETWORK_MASK[1]).
+        """
+        return f"http://172.30.32.1:8100/mjpeg/{name}"
+
     async def start(self) -> None:
         self._task = asyncio.create_task(self._loop())
 

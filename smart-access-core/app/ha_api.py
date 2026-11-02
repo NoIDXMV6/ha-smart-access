@@ -88,9 +88,37 @@ def frigate_event_snapshot(frigate_url: str, event_id: str, crop: bool = True) -
     return None
 
 
-def frigate_ping(frigate_url: str) -> bool:
+def frigate_probe(frigate_url: str) -> dict[str, Any]:
+    """Проверка связи с Frigate API + ПОНЯТНАЯ причина ошибки для UI.
+
+    Никогда не бросает исключений: возвращает {'ok': bool, 'error': str | None}.
+    """
+    url = f"{frigate_url}/api/version"
     try:
-        resp = requests.get(f"{frigate_url}/api/version", timeout=4)
-        return resp.ok
-    except requests.RequestException:
-        return False
+        resp = requests.get(url, timeout=4)
+    except requests.RequestException as exc:
+        hint = ""
+        s = str(exc).lower()
+        if "refused" in s:
+            hint = (" Соединение отклонено: приложение Frigate не запущено, либо порт 5000 "
+                    "не опубликован. Откройте Frigate → Конфигурация → Сеть и впишите 5000 "
+                    "в поле «Unauthenticated Web interface», затем Сохранить.")
+        elif "timed out" in s or "timeout" in s:
+            hint = " Frigate не ответил за 4 с — проверьте, что приложение запущено."
+        return {"ok": False, "error": f"Нет связи с {url}: {exc}.{hint}"}
+    if resp.ok:
+        return {"ok": True, "error": None}
+    ctype = resp.headers.get("content-type", "")
+    if "text/html" in ctype:
+        return {"ok": False, "error": (
+            f"По адресу {url} отвечает не Frigate API, а HTML-страница (HTTP {resp.status_code}) — "
+            "почти наверняка указан неверный порт в frigate_url. В аддоне Frigate порт 8556 — "
+            "это WebRTC (go2rtc), а HTTP API — порт 5000. Поставьте frigate_url = "
+            "http://127.0.0.1:5000 и опубликуйте порт 5000 в настройках сети приложения "
+            "Frigate (Сеть → «Unauthenticated Web interface» → 5000).")}
+    return {"ok": False, "error": f"{url} -> HTTP {resp.status_code} ({ctype or 'без content-type'})"}
+
+
+def frigate_ping(frigate_url: str) -> bool:
+    """Совместимость: просто bool из frigate_probe."""
+    return frigate_probe(frigate_url)["ok"]

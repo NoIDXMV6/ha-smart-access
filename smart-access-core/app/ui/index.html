@@ -30,6 +30,8 @@
   .ev b { min-width:120px; }
   input[type=text], input[type=file] { font-size:13px; padding:7px; border:1px solid var(--line); border-radius:8px; }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .frigate-warn { color:var(--err); background:#fff8e1; border:1px solid #f0d8a8;
+                  border-radius:8px; padding:8px 12px; font-size:12.5px; line-height:1.45; }
 </style>
 </head>
 <body>
@@ -89,6 +91,7 @@
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
 async function refresh() {
   try {
@@ -101,11 +104,12 @@ async function refresh() {
       `<tr><td>${n}</td><td>${c.entity}</td><td><span class="pill ${c.failures>5?'err':'ok'}">сбоев: ${c.failures}</span></td><td>${c.direct?'<b>прямой RTSP</b> (без моста) — Frigate берёт поток напрямую':c.url}</td></tr>`).join('');
     $('status').innerHTML =
       `<table><tr><th>Камера</th><th>HA-сущность</th><th>Состояние</th><th>Источник для Frigate</th></tr>${rows}</table>
-       <p>Модели: ${Object.entries(st.models).map(([k,v])=>`<span class="pill ${v==='ok'?'ok':'err'}">${k}: ${v}</span>`).join(' ')}
+       <p>Модели: ${Object.entries(st.models).map(([k,v])=>`<span class="pill ${v==='ok'?'ok':'err'}">${k}: ${esc(v)}</span>`).join(' ')}
        &nbsp; Frigate: ${st.frigate?'<span class="pill ok">связь есть</span>':'<span class="pill err">нет связи</span>'}
-       &nbsp; MQTT: ${st.mqtt_host}
-       &nbsp; Событий: ${st.stats.events_seen}, допусков: ${st.stats.grants}, отказов: ${st.stats.denied}, VLM: ${st.stats.vlm_calls}</p>`;
-  } catch(e) { $('status').textContent = 'ошибка загрузки статуса'; }
+       &nbsp; MQTT: ${esc(st.mqtt_host)}
+       &nbsp; Событий: ${st.stats.events_seen}, допусков: ${st.stats.grants}, отказов: ${st.stats.denied}, VLM: ${st.stats.vlm_calls}</p>`
+       + (st.frigate_error ? `<p class="frigate-warn">⚠ ${esc(st.frigate_error)}</p>` : '');
+  } catch(e) { $('status').textContent = 'ошибка загрузки статуса: ' + (e && e.message ? e.message : e); }
   try {
     const s = await (await fetch('/api/subjects')).json();
     fill('cars', s.cars, 'car'); fill('faces', s.faces, 'face');

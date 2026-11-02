@@ -293,7 +293,8 @@ Frigate подключается к брокеру со своими настр�
 * `addon` — слаг SIP-аддона, по умолчанию `c7744bff_ha-sip`;
 * `numbers` — по одному номеру в строке, например
   `sip:89256758881@pbx.kozhevatov.ru`;
-* `sip_account` (1–3), `ring_timeout` (сек);
+* `sip_account` (номер SIP-аккаунта в ha-sip, с 1.3.1 без верхней границы),
+  `ring_timeout` (сек);
 * `language` — язык озвучки TTS (например `ru`);
 * `message_template` — текст звонка, плейсхолдеры `{name}` `{camera}`
   `{time}` `{date}`, по умолчанию «Тревога! {time}, {name} открыл калитку

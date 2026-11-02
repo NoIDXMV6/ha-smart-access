@@ -1,0 +1,47 @@
+name: Tests
+
+# Автотесты аддона (pytest) — гоняются на каждый push и PR.
+# Падение тестов = красный коммит; релизы собираются только с зелёными тестами.
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r smart-access-core/requirements-ci.txt
+
+      - name: Run tests
+        run: python -m pytest smart-access-core/tests/ -v --tb=short
+
+      - name: Validate addon config.json
+        run: |
+          python3 - <<'EOF'
+          import json
+          cfg = json.load(open('smart-access-core/config.json'))
+          assert cfg['version'], 'addon version required'
+          assert cfg['slug'] == 'smart-access-core'
+          schema, options = cfg['schema'], cfg['options']
+          # дефолты обязаны проходить собственную схему (иначе диалог
+          # «Конфигурация» аддона не примет даже заводские значения)
+          import sys; sys.path.insert(0, 'smart-access-core/tests')
+          from test_v131_options_schema import validate_app_options
+          validate_app_options(schema, options)
+          print('config.json OK:', cfg['version'])
+          EOF

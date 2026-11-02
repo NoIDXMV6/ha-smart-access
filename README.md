@@ -168,12 +168,14 @@ cameras:
     ffmpeg:
       inputs:
         - path: http://172.30.32.1:8100/mjpeg/govorovo   # MJPEG-мост аддона (шлюз hassio-сети)
-          input_args: -f mjpeg
+          input_args: >-          # НЕ пишите «-f mjpeg»: сырой демуксер не
+            -use_wallclock_as_timestamps 1   # завершает пробу формата на
+            -fflags +genpts+discardcorrupt   # multipart-потоке — см. DOCS.md
           roles:
             - detect
     detect:
       enabled: true
-      fps: 5
+      fps: 2                      # мост отдаёт ~bridge_fps (по умолчанию 1.5)
       width: 1280
       height: 720
     objects:

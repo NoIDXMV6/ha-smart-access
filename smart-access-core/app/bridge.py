@@ -57,6 +57,7 @@ class Bridge:
         self.clients: dict[str, int] = {}        # name -> количество подписчиков
         self.entities: dict[str, str] = {}       # name -> ha entity
         self._task: asyncio.Task | None = None
+        self._bg: set[asyncio.Task] = set()      # фоновые задачи (не дать сборщику их съесть)
         self.failures: dict[str, int] = {}
         # телеметрия реального потока (видна в UI: «fps» рядом со «сбоев»)
         self.fps: dict[str, float] = {}          # name -> EMA кадров/с
@@ -110,38 +111,77 @@ class Bridge:
                 LOG.exception("Мост: сбой цикла: %s", exc)
             await asyncio.sleep(self.interval)
 
-    async def _tick(self, loop: asyncio.get_running_loop) -> None:
-        # Кадр нужен только для камер с активными подписчиками (Frigate)
-        for name, entity in self.entities.items():
-            if self.clients.get(name, 0) <= 0:
-                continue
+    async def _fetch_one(self, loop: asyncio.AbstractEventLoop,
+                         name: str, entity: str) -> None:
+        """Один опрос камеры + телеметрия. Не бросает исключений."""
+        try:
             jpeg = await loop.run_in_executor(None, ha_api.get_camera_image, entity)
-            if jpeg:
-                self.latest[name] = jpeg
-                self.failures[name] = 0
-                now = time.time()
-                prev = self.last_frame_ts.get(name)
-                self.last_frame_ts[name] = now
-                self.frames[name] = self.frames.get(name, 0) + 1
-                if prev:
-                    dt = max(0.05, now - prev)
-                    inst = 1.0 / dt
-                    # EMA: сглаживает скачки, но быстро видит «0 fps» при сбое
-                    self.fps[name] = round(0.7 * self.fps.get(name, inst) + 0.3 * inst, 2)
-            else:
-                self.failures[name] = self.failures.get(name, 0) + 1
-                # после 5 неудач подряд — отдаём заглушку и логируем редко
-                if self.failures[name] in (1, 30, 300):
-                    LOG.warning("Мост: камера %s (%s) не отвечает (%s подряд)",
-                                name, entity, self.failures[name])
+        except Exception:  # noqa: BLE001
+            jpeg = None
+        if jpeg:
+            self.latest[name] = jpeg
+            self.failures[name] = 0
+            now = time.time()
+            prev = self.last_frame_ts.get(name)
+            self.last_frame_ts[name] = now
+            self.frames[name] = self.frames.get(name, 0) + 1
+            if prev:
+                dt = max(0.05, now - prev)
+                inst = 1.0 / dt
+                # EMA: сглаживает скачки, но быстро видит «0 fps» при сбое
+                self.fps[name] = round(0.7 * self.fps.get(name, inst) + 0.3 * inst, 2)
+        else:
+            self.failures[name] = self.failures.get(name, 0) + 1
+            # после 5 неудач подряд — отдаём заглушку и логируем редко
+            if self.failures[name] in (1, 30, 300):
+                LOG.warning("Мост: камера %s (%s) не отвечает (%s подряд)",
+                            name, entity, self.failures[name])
+
+    def _kick(self, name: str, entity: str) -> None:
+        """Фоновый внеочередной опрос одной камеры (не ждёт ближайшего тика)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._fetch_one(loop, name, entity))
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+
+    async def _tick(self, loop: asyncio.AbstractEventLoop) -> None:
+        # v1.1.13: камеры с подписчиками опрашиваются ПАРАЛЛЕЛЬНО.
+        # Раньше опрос шёл последовательно: пока тянется медленный облачный
+        # снимок одной камеры (до 12 с), остальные ждут, и с ростом числа
+        # камер реальный fps каждой падал до долей кадра в секунду
+        # (замер на стенде: 3 камеры с задержками 1.0/0.5/0.9 с — реальный
+        # fps prud 0.3 при отдаче клиенту 1.5 fps).
+        pending = [
+            self._fetch_one(loop, name, entity)
+            for name, entity in self.entities.items()
+            if self.clients.get(name, 0) > 0
+        ]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # ---------- aiohttp ----------
 
     async def handle_mjpeg(self, request: web.Request) -> web.StreamResponse:
         name = request.match_info["name"]
         if name not in self.entities:
+            # частая причина «404» — имя в конфиге Frigate не совпадает с name
+            # камеры в Smart Access (например, поток govorovo при камере a_m_video)
+            LOG.warning("Мост: запрос НЕИЗВЕСТНОЙ камеры «%s» (известны: %s)",
+                        name, ", ".join(sorted(self.entities)) or "нет")
             return web.json_response({"error": "unknown camera"}, status=404)
+        entity = self.entities[name]
+        first_client = self.clients.get(name, 0) == 0
         self.clients[name] = self.clients.get(name, 0) + 1
+        if first_client:
+            # первый подписчик: кадр тянем сразу, а не с ближайшего тика —
+            # Frigate получает живую картинку на секунды раньше
+            self._kick(name, entity)
+        started = time.time()
+        LOG.info("Мост: клиент %s подключился к «%s» (%s), подписчиков: %d",
+                 request.remote or "?", name, entity, self.clients[name])
         resp = web.StreamResponse(
             status=200,
             headers={
@@ -163,6 +203,9 @@ class Bridge:
             pass
         finally:
             self.clients[name] = max(0, self.clients.get(name, 1) - 1)
+            LOG.info("Мост: клиент %s отключился от «%s» (%.1f с, подписчиков: %d)",
+                     request.remote or "?", name, time.time() - started,
+                     self.clients[name])
         return resp
 
     async def handle_latest(self, request: web.Request) -> web.Response:

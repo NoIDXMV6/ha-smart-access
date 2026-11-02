@@ -81,7 +81,8 @@
     <h2>Конфиг Frigate (генератор)</h2>
     <p class="muted">Скопируйте в конфиг Frigate: веб-интерфейс Frigate → редактор конфигурации
     (или файл /addon_configs/ccab4aaf_frigate/config.yml). Страница «Конфигурация» аддона для этого не используется.
-    Пароль брокера подставьте свой.</p>
+    Креды MQTT подставлены автоматически (Supervisor): если Frigate пишет
+    <b>MQTT Not authorized</b> — замените блок mqtt в его конфиге этим блоком целиком.</p>
     <textarea id="frigateCfg" readonly></textarea>
     <div class="row" style="margin-top:8px">
       <button onclick="loadFrigate()">Сгенерировать</button>
@@ -106,7 +107,7 @@ async function refresh() {
     $('masterBtn').textContent = st.master_enable ? 'Авто-допуск: ВКЛ' : 'Авто-допуск: ВЫКЛ';
     $('masterBtn').className = st.master_enable ? 'master-on' : 'master-off';
     const rows = Object.entries(st.bridge||{}).map(([n,c]) =>
-      `<tr><td>${n}</td><td>${c.entity}</td><td><span class="pill ${c.failures>5?'err':'ok'}">сбоев: ${c.failures}</span></td><td>${c.direct?'<b>прямой RTSP</b> (без моста) — Frigate берёт поток напрямую':c.url}</td></tr>`).join('');
+      `<tr><td>${n}</td><td>${esc(c.entity)}</td><td><span class="pill ${c.failures>5?'err':'ok'}">сбоев: ${c.failures}</span>${c.direct?'':` <span class="pill ${c.fps>0?'ok':''}">fps: ${c.fps||0}</span>`}</td><td>${c.direct?'<b>прямой RTSP</b> (без моста) — Frigate берёт поток напрямую':esc(c.url)}</td></tr>`).join('');
     $('status').innerHTML =
       `<table><tr><th>Камера</th><th>HA-сущность</th><th>Состояние</th><th>Источник для Frigate</th></tr>${rows}</table>
        <p>Модели: ${Object.entries(st.models).map(([k,v])=>`<span class="pill ${v==='ok'?'ok':'err'}">${k}: ${esc(v)}</span>`).join(' ')}

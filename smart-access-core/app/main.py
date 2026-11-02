@@ -53,12 +53,19 @@ def build_frigate_config(conf, bridge) -> str:
         `core-mosquitto` (или внешнему IP); localhost подменяем автоматически;
       * наш MJPEG-мост слушает на хосте, из мостовой сети хост — это шлюз
         172.30.32.1, поэтому в конфиг подставляется он, а не 127.0.0.1.
+
+    Креды MQTT (user/password) подставляются РАБОЧИЕ — те же, под которыми
+    подключается сам Smart Access (Supervisor /services/mqtt или опции аддона).
+    Заглушка «ВАШ_ПАРОЛЬ_БРОКЕРА» приводила к «MQTT Not authorized» у Frigate:
+    пользователь копировал конфиг как есть.
     """
     cams = [c for c in conf.cameras if c.get("mode", "off") != "off"]
     mqtt_host = str(conf.mqtt.get("host") or "").strip()
     if mqtt_host in ("", "localhost", "127.0.0.1", "::1"):
         # для мостового аддона Frigate localhost — это он сам; брокер — соседний аддон
         mqtt_host = "core-mosquitto"
+    mqtt_user = str(conf.mqtt.get("user") or "").strip()
+    mqtt_pass = str(conf.mqtt.get("password") or "")
     lines: list[str] = []
     lines.append("# === Сгенерировано Smart Access Core ===")
     lines.append("# Куда вставить: веб-интерфейс Frigate → Configuration → вставить → Save & Restart.")
@@ -67,16 +74,19 @@ def build_frigate_config(conf, bridge) -> str:
     lines.append("mqtt:")
     lines.append(f"  host: {mqtt_host}")
     lines.append(f"  port: {int(conf.mqtt.get('port') or 1883)}")
-    if conf.mqtt.get("user"):
-        lines.append(f"  user: {conf.mqtt['user']}")
-        lines.append("  password: ВАШ_ПАРОЛЬ_БРОКЕРА")
+    if mqtt_user:
+        lines.append(f"  user: {mqtt_user}")
+        if mqtt_pass:
+            lines.append(f"  password: {mqtt_pass}")
+        lines.append("# креды подставлены автоматически (Supervisor) — не публикуйте конфиг целиком")
     lines.append("")
     lines.append("detectors:")
     lines.append("  cpu:")
     lines.append("    type: openvino")
     lines.append("    device: CPU")
-    lines.append("    model:")
-    lines.append("      path: /openvino-model/ssdlite_mobilenet_v2.xml")
+    # NB: секция model — только В КОРНЕ конфига (Frigate 0.14+): вложенный
+    # model под detectors игнорируется с WARNING «The model key should be
+    # specified at the root level».
     lines.append("model:")
     lines.append("  width: 300")
     lines.append("  height: 300")
@@ -199,6 +209,8 @@ async def main() -> None:
                     "url": (c.get("rtsp_url") or "").strip() or bridge.frigate_url(c["name"]),
                     "failures": bridge.failures.get(c["name"], 0),
                     "clients": bridge.clients.get(c["name"], 0),
+                    "fps": bridge.fps.get(c["name"], 0.0),
+                    "frames": bridge.frames.get(c["name"], 0),
                 }
                 for c in conf.cameras
             },
@@ -281,6 +293,13 @@ async def main() -> None:
     if UI_DIR.exists():
         app.router.add_static("/ui/", UI_DIR)
 
+    # ---------------- MJPEG-порт 8100 ----------------
+    # v1.1.10 и раньше сайт на 8100 НЕ поднимался вовсе: маршруты /mjpeg/*
+    # были зарегистрированы, а слушали только :8099 — Frigate получал
+    # «Connection to tcp://172.30.32.1:8100 refused» и ffmpeg-цикл падал.
+    await start_bridge_site(runner)
+    LOG.info("Smart Access Core запущен: UI на :8099, MJPEG-мост на :8100")
+
     # ---------------- сигналы ----------------
 
     def request_reload(_sig, _frm):  # noqa: ANN001
@@ -294,11 +313,34 @@ async def main() -> None:
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8099)
     await site.start()
-    LOG.info("Smart Access Core запущен: UI на :8099, MJPEG на :8100")
     brain.publish_status()
 
     while True:
         await asyncio.sleep(3600)
+
+
+async def start_bridge_site(runner: web.AppRunner, port: int = 8100) -> None:
+    """Слушаем MJPEG-порт на адресах, доступных Frigate.
+
+    Frigate — мостовой аддон (сеть hassio): хост для него — шлюз 172.30.32.1;
+    127.0.0.1 оставляем для локальных проверок с самого хоста.
+    Список переопределяется env SMART_ACCESS_BRIDGE_BIND (через запятую);
+    если ни одна привязка не удалась — фолбэк 0.0.0.0.
+    """
+    env_binds = os.environ.get("SMART_ACCESS_BRIDGE_BIND", "")
+    binds = [a.strip() for a in env_binds.split(",") if a.strip()] or \
+        ["172.30.32.1", "127.0.0.1"]
+    started: list[str] = []
+    for addr in binds:
+        try:
+            await web.TCPSite(runner, addr, port).start()
+            LOG.info("MJPEG-мост слушает %s:%s", addr, port)
+            started.append(addr)
+        except OSError as exc:
+            LOG.warning("MJPEG-мост: привязка %s:%s не удалась (%s)", addr, port, exc)
+    if not started:
+        await web.TCPSite(runner, "0.0.0.0", port).start()
+        LOG.warning("MJPEG-мост слушает 0.0.0.0:%s (фолбэк: ни одна привязка не удалась)", port)
 
 
 async def status_loop(brain: Brain) -> None:

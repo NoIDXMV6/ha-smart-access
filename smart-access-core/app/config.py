@@ -89,6 +89,33 @@ def _read_options() -> dict[str, Any]:
     return merge(defaults, user or {})
 
 
+def slugify_camera_name(name: str) -> str:
+    """Имя камеры в формате Frigate: только [a-z0-9_].
+
+    Frigate отвергает имена с кириллицей и точками («а.м.видео», «егдс»,
+    «калитка» — реальные имена камер пользователя). Нормализуем: транслит
+    кириллицы, прочие символы → «_», схлопывание и обрезка подчёркиваний.
+    """
+    translit = {
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+        "ж": "zh", "з": "z", "и": "i", "й": "i", "к": "k", "л": "l", "м": "m",
+        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+        "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
+        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    }
+    out: list[str] = []
+    for ch in str(name or "").strip().lower():
+        if ch in translit:
+            out.append(translit[ch])
+        elif (ch.isascii() and ch.isalnum()) or ch in "-_":
+            out.append(ch)
+        else:
+            out.append("_")
+    import re as _re
+    slug = _re.sub(r"_+", "_", "".join(out)).strip("_-")
+    return slug or "camera"
+
+
 class Config:
     """Иммутабельный снимок конфигурации (перечитывается по SIGHUP/на кнопке в UI)."""
 
@@ -111,7 +138,29 @@ class Config:
             pass
         self.frigate_url: str = str(opts["frigate_url"]).rstrip("/")
         self.mqtt: dict[str, Any] = opts["mqtt"]
-        self.cameras: list[dict[str, Any]] = list(opts.get("cameras") or [])
+
+        # Имена камер приводим к формату Frigate ([a-z0-9_]): пользователь
+        # вписывает «а.м.видео», «егдс», «калитка» — Frigate такие ключи
+        # отвергает, а MQTT-события приходят с slug-именами.
+        cams: list[dict[str, Any]] = []
+        used: set[str] = set()
+        for c in list(opts.get("cameras") or []):
+            if not isinstance(c, dict):
+                continue
+            orig = str(c.get("name") or "").strip()
+            slug = slugify_camera_name(orig)
+            base, n = slug, 2
+            while slug in used:
+                slug = f"{base}_{n}"
+                n += 1
+            used.add(slug)
+            cc = dict(c)
+            cc["name"] = slug
+            if orig and slug != orig:
+                LOG.warning("Имя камеры «%s» нормализовано в «%s» (формат Frigate: [a-z0-9_])",
+                            orig, slug)
+            cams.append(cc)
+        self.cameras: list[dict[str, Any]] = cams
         self.recognition: dict[str, Any] = opts["recognition"]
         self.vlm: dict[str, Any] = opts["vlm"]
 

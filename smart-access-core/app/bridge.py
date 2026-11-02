@@ -3,10 +3,16 @@
 Frigate не умеет читать облачные потоки А.М.Видео (WSS MPEG1-TS) и ЕГДС
 (авторизованные снимки). Этот мост тянет кадры через camera_proxy самого HA
 (авторизация — SUPERVISOR_TOKEN аддона) и раздаёт их как обычный
-MJPEG-поток http://127.0.0.1:8100/mjpeg/<name>, который Frigate берёт как:
+MJPEG-поток, который Frigate берёт как:
     inputs:
-      - path: http://127.0.0.1:8100/mjpeg/govorovo
+      - path: http://172.30.32.1:8100/mjpeg/govorovo
         input_args: -f mjpeg
+
+АДРЕС ДЛЯ FRIGATE — http://172.30.32.1:8100 (не 127.0.0.1!): Frigate —
+мостовой аддон (сеть hassio), для него 127.0.0.1 — его собственный
+контейнер; наш аддон слушает на хосте, а хост из мостовой сети — шлюз
+172.30.32.1. Сайт на :8100 поднимается в main.start_bridge_site
+(до v1.1.11 порт вообще не слушался — «Connection refused» у ffmpeg).
 
 Универсально: работает с ЛЮБОЙ камерой HA (облачные шлагбаумы, домофония
 Hikvision, локальные RTSP-камеры — если у тех есть camera entity).
@@ -52,6 +58,10 @@ class Bridge:
         self.entities: dict[str, str] = {}       # name -> ha entity
         self._task: asyncio.Task | None = None
         self.failures: dict[str, int] = {}
+        # телеметрия реального потока (видна в UI: «fps» рядом со «сбоев»)
+        self.fps: dict[str, float] = {}          # name -> EMA кадров/с
+        self.last_frame_ts: dict[str, float] = {}  # name -> время последнего кадра
+        self.frames: dict[str, int] = {}         # name -> всего получено кадров
 
     def set_cameras(self, cams: list[dict]) -> None:
         """Список из конфига: [{'name', 'ha_entity'}, ...] (перезаписывает карту)."""
@@ -59,6 +69,15 @@ class Bridge:
         for name in self.entities:
             self.latest.setdefault(name, _placeholder_jpeg())
             self.failures.setdefault(name, 0)
+            self.fps.setdefault(name, 0.0)
+            self.frames.setdefault(name, 0)
+        for gone in list(self.fps):
+            if gone not in self.entities:
+                self.fps.pop(gone, None)
+                self.last_frame_ts.pop(gone, None)
+                self.frames.pop(gone, None)
+                self.failures.pop(gone, None)
+                self.latest.pop(gone, None)
 
     def url(self, name: str) -> str:
         return f"http://127.0.0.1:8100/mjpeg/{name}"
@@ -100,6 +119,15 @@ class Bridge:
             if jpeg:
                 self.latest[name] = jpeg
                 self.failures[name] = 0
+                now = time.time()
+                prev = self.last_frame_ts.get(name)
+                self.last_frame_ts[name] = now
+                self.frames[name] = self.frames.get(name, 0) + 1
+                if prev:
+                    dt = max(0.05, now - prev)
+                    inst = 1.0 / dt
+                    # EMA: сглаживает скачки, но быстро видит «0 fps» при сбое
+                    self.fps[name] = round(0.7 * self.fps.get(name, inst) + 0.3 * inst, 2)
             else:
                 self.failures[name] = self.failures.get(name, 0) + 1
                 # после 5 неудач подряд — отдаём заглушку и логируем редко

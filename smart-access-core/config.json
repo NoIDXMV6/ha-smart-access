@@ -1,6 +1,6 @@
 {
   "name": "Smart Access Core",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "slug": "smart-access-core",
   "description": "Умный допуск на одной VM с HAOS: авто-открытие шлагбаумов по своим машинам и калитки по лицам. LLM — только внешний URL+token+модель (опционально).",
   "url": "https://github.com/NoIDXMV6/ha-smart-access",
@@ -20,7 +20,7 @@
     "8099/tcp": "Web-интерфейс и API (статус, база «своих», генератор конфига Frigate)",
     "8100/tcp": "MJPEG-мост для камер без RTSP (вход для Frigate, localhost)"
   },
-  "webui": "http://[HOST]:8099",
+  "webui": "http://[HOST]:[PORT:8099]",
   "ingress": true,
   "ingress_port": 8099,
   "panel_icon": "mdi:shield-car",

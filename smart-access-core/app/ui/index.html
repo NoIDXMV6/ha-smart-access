@@ -92,10 +92,15 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+// База API относительно ТЕКУЩЕГО документа. Панель открывается через ingress
+// по адресу /api/hassio_ingress/<токен>/ — запросы с ведущим '/' (fetch('/api/...'))
+// уходили бы в КОРЕНЬ Home Assistant (та отвечает HTML), а не в аддон.
+// Относительный путь работает и под ingress, и при прямом открытии :8099.
+const API = (p) => (location.pathname.endsWith('/') ? location.pathname : location.pathname + '/') + String(p).replace(/^\/+/, '');
 
 async function refresh() {
   try {
-    const st = await (await fetch('/api/status')).json();
+    const st = await (await fetch(API('api/status'))).json();
     $('state').textContent = st.state === 'ok' ? 'работает' : 'деградация';
     $('state').className = 'state ' + st.state;
     $('masterBtn').textContent = st.master_enable ? 'Авто-допуск: ВКЛ' : 'Авто-допуск: ВЫКЛ';
@@ -111,11 +116,11 @@ async function refresh() {
        + (st.frigate_error ? `<p class="frigate-warn">⚠ ${esc(st.frigate_error)}</p>` : '');
   } catch(e) { $('status').textContent = 'ошибка загрузки статуса: ' + (e && e.message ? e.message : e); }
   try {
-    const s = await (await fetch('/api/subjects')).json();
+    const s = await (await fetch(API('api/subjects'))).json();
     fill('cars', s.cars, 'car'); fill('faces', s.faces, 'face');
   } catch(e) {}
   try {
-    const ev = (await (await fetch('/api/events')).json()).events || [];
+    const ev = (await (await fetch(API('api/events'))).json()).events || [];
     $('events').innerHTML = ev.slice(0,20).map(e =>
       `<div class="ev"><b>${new Date(e.ts*1000).toLocaleString()}</b><span class="pill">${e.kind}</span>
        <span>${e.camera} — ${e.action}</span><span class="muted">${e.detail||''}</span></div>`).join('') || 'пусто';
@@ -133,7 +138,7 @@ function fill(id, map, kind) {
 
 async function del(kind, subject) {
   if (!confirm(`Удалить «${subject}» из базы?`)) return;
-  await fetch('/api/subjects/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+  await fetch(API('api/subjects/delete'), {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({kind, subject})});
   refresh();
 }
@@ -143,19 +148,19 @@ async function enroll(kind) {
   const file = $(kind==='car'?'carPhoto':'facePhoto').files[0];
   if (!name || !file) { alert('Укажите имя и выберите фото'); return; }
   const fd = new FormData(); fd.append('kind', kind); fd.append('subject', name); fd.append('photo', file);
-  const r = await (await fetch('/api/enroll', {method:'POST', body: fd})).json();
+  const r = await (await fetch(API('api/enroll'), {method:'POST', body: fd})).json();
   alert(r.ok ? `Готово: +${r.added} эмбеддингов` : `Ошибка: ${r.error}`);
   refresh();
 }
 
 async function toggleMaster() {
-  const st = await (await fetch('/api/status')).json();
-  await fetch('/api/master', {method:'POST', headers:{'Content-Type':'application/json'},
+  const st = await (await fetch(API('api/status'))).json();
+  await fetch(API('api/master'), {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({enabled: !st.master_enable})});
   refresh();
 }
 
-async function loadFrigate() { $('frigateCfg').value = await (await fetch('/api/frigate-config')).text(); }
+async function loadFrigate() { $('frigateCfg').value = await (await fetch(API('api/frigate-config'))).text(); }
 
 refresh(); setInterval(refresh, 5000);
 </script>

@@ -17,4 +17,4 @@ fi
 export SMART_ACCESS_MODELS_DIR="$MODELS_DIR"
 
 bashio::log.info "Запуск Smart Access Core..."
-exec python3 -u /app/main.py
+exec python3 -u /app/app/main.py

@@ -22,7 +22,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import config as cfg        # noqa: E402
 from app import ha_api               # noqa: E402

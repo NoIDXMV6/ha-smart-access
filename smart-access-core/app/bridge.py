@@ -31,10 +31,13 @@ HA) — поэтому всё работало стабильно.
 Frigate — мостовой аддон (сеть hassio), хост для него — шлюз 172.30.32.1.
 Сайт на :8100 поднимается в main.start_bridge_site.
 
-Чтобы клиентов камеры не стало снова несколько, карточку в HA стоит
-переключить на мост (универсальная камера: «URL потока» =
-http://172.30.32.1:8100/mjpeg/<name>) — тогда HA тоже читает камеру
-через мост. См. README «Архитектура камер: один получатель».
+Чтобы клиентов камеры не стало снова несколько, карточки в HA читают
+мост: у интеграции Smart Access (v1.4.0+) для каждой камеры автоматически
+появляется сущность camera.smart_access_<name> (MJPEG-проксирование
+моста). Запасной вариант для Универсальной камеры — «URL кадра»
+(still_image_url) = http://172.30.32.1:8100/snapshot/<name>. Вставлять
+/mjpeg/<name> в «Поток» Универсальной камеры НЕ нужно — HA не открывает
+multipart как RTSP. См. README «Карточки в HA».
 
 Отказоустойчивость: при недоступности источника поток отдаёт «заглушку»
 и продолжает попытки с бэкоффом (1→2→5→10→30 с); Frigate переживает
@@ -170,10 +173,14 @@ class Bridge:
     # Приём кадров (общая телеметрия, потокобезопасно в рамках GIL)
     # ------------------------------------------------------------------
 
-    def _accept(self, name: str, jpeg: bytes, source: str) -> None:
+    def _accept(self, name: str, jpeg: bytes, source: str,
+                mode_override: str | None = None) -> None:
+        """Принять кадр. mode_override сохраняет РЕЖИМ получателя (v1.4.0):
+        запасной снимок в режиме «stream» не должен переключать камеру в
+        «proxy» — иначе подсказка панели начнёт врать про источник."""
         self.latest[name] = jpeg
         self.failures[name] = 0
-        self.mode[name] = source
+        self.mode[name] = mode_override or source
         self.source[name] = source
         self.last_error[name] = ""
         now = time.time()
@@ -311,8 +318,15 @@ class Bridge:
 
         Работает в executor-потоке: читает multipart-MJPEG, вырезает полные
         JPEG (SOI…EOI), обрыв/таймаут -> переподключение с бэкоффом.
+
+        v1.4.0 — ГИБРИД: если endpoint потока HA лежит 3 попытки подряд
+        («поток HA недоступен», HTTP 5xx), а одиночные снимки у камеры
+        работают, кадры берём снимком — камера НЕ остаётся без кадров,
+        пока endpoint потока чинится (реальный случай: prud, сбоев 11
+        за 10 минут, fps ронялся до нуля на паузах бэкоффа).
         """
         backoff = 1.0
+        consec_fails = 0
         while not stop.is_set():
             if not self._has_clients(name):
                 if stop.wait(5.0):
@@ -329,8 +343,21 @@ class Bridge:
                 return
             if got_frame:
                 backoff = 1.0
+                consec_fails = 0
                 continue
-            # кадров не было — пауза перед новым соединением
+            consec_fails += 1
+            if consec_fails >= 3:
+                # запасной кадр одиночным снимком (режим остаётся «stream»)
+                jpeg, snap_err = ha_api.get_camera_snapshot_ex(entity, 8)
+                if jpeg:
+                    self._accept(name, jpeg, "proxy", mode_override="stream")
+                    consec_fails = 0
+                    backoff = 1.0
+                    LOG.info("Мост: «%s» — поток HA недоступен, кадр взят одиночным "
+                             "снимком (запасной путь, режим stream сохранён)", name)
+                else:
+                    self._fail(name, f"снимок тоже не удался: {snap_err}")
+            # пауза перед новым соединением
             if stop.wait(backoff):
                 return
             backoff = min(30.0, backoff * 2)
@@ -430,9 +457,9 @@ class Bridge:
                         "камере rtsp_url.")
             if mode == "rtsp":
                 return ("Мост сам читает RTSP камеры — клиентов камеры: 1. "
-                        "Карточку в HA переключите на мост (mjpeg_url "
-                        "http://172.30.32.1:8100/mjpeg/" + name + "), чтобы HA не "
-                        "открывал вторую сессию.")
+                        "В карточках HA используйте сущность camera.smart_access_bridge_"
+                        + name + " (интеграция Smart Access) — она играет мост и не "
+                        "открывает вторую сессию к камере.")
             return ""
         if mode == "rtsp" and failures:
             return (f"RTSP недоступен ({err}). Проверьте rtsp_url и доступность "
@@ -440,8 +467,9 @@ class Bridge:
         if failures >= 5:
             return (f"Постоянный поток HA не отвечает ({err}). Проверьте, что "
                     "карточка этой камеры в HA играет. Локальная камера → впишите "
-                    "rtsp_url (мост будет читать её напрямую, один клиент); "
-                    "универсальной камере можно добавить «URL кадра» (still_image_url).")
+                    "rtsp_url (мост будет читать её напрямую, один клиент, полный "
+                    "fps); универсальной камере — «URL кадра» (still_image_url) "
+                    "на http://172.30.32.1:8100/snapshot/" + name + ".")
         return ""
 
     # ------------------------------------------------------------------
@@ -504,6 +532,31 @@ class Bridge:
         jpeg = self.latest.get(name) or _placeholder_jpeg()
         return web.Response(body=jpeg, content_type="image/jpeg")
 
+    async def handle_snapshot(self, request: web.Request) -> web.Response:
+        """ОДИН кадр (image/jpeg) для карточек HA — v1.4.0.
+
+        Назначение: «URL кадра» (still_image_url) Универсальной камеры и
+        любые внешние потребители. multipart-поток /mjpeg/<name> в поле
+        «Поток» Универсальной камеры НЕ вставляется — HA не открывает
+        MJPEG-мультикоплекс как RTSP, карточка остаётся серой.
+
+        Запрос снимка — тоже интерес к камере: запускает получателя и
+        продлевает его жизнь (иначе камера, у которой только карточка со
+        снимком, никогда не оживёт — получатель стартует лишь от /mjpeg).
+        """
+        name = request.match_info["name"]
+        if name not in self.entities:
+            LOG.warning("Мост: снимок НЕИЗВЕСТНОЙ камеры «%s» (известны: %s)",
+                        name, ", ".join(sorted(self.entities)) or "нет")
+            return web.json_response({"error": "unknown camera"}, status=404)
+        self._last_client_ts[name] = time.time()
+        task = self._feeder.get(name)
+        if not task or task.done():
+            self._kick(name)
+        jpeg = self.latest.get(name) or _placeholder_jpeg()
+        return web.Response(body=jpeg, content_type="image/jpeg")
+
     def register(self, app: web.Application) -> None:
         app.router.add_get("/mjpeg/{name}", self.handle_mjpeg)
+        app.router.add_get("/snapshot/{name}", self.handle_snapshot)
         app.router.add_get("/latest/{name}", self.handle_latest)

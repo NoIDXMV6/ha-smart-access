@@ -1,0 +1,65 @@
+# Карточки камер моста Smart Access (v1.4.0+) — картинка в HA идёт с МОСТА,
+# у физической камеры остаётся ОДИН получатель (Frigate и HA читают мост).
+#
+# ТРЕБОВАНИЯ:
+#   1) аддон Smart Access Core 1.4.0+ запущен, камеры настроены;
+#   2) интеграция Smart Access (HACS) обновлена до 1.4.0+, ПОСЛЕ обновления
+#      HA перезапущен (Настройки → Система → Перезапустить);
+#   3) сущности создаются автоматически: camera.smart_access_bridge_<имя>,
+#      где <имя> — имя камеры из настроек аддона в формате Frigate
+#      (кириллица транслитерируется: «Пруд» → prud, «Калитка» → kalitka).
+#      Проверить: Настройки → Устройства и службы → Сущности → поиск
+#      «smart_access».
+#
+# ВАЖНО: НЕ вставляйте http://172.30.32.1:8100/mjpeg/… в поле «Поток»
+# Универсальной камеры — HA открывает stream_source как RTSP/видео и не
+# понимает multipart-поток, карточка останется серой. Если нужна
+# Универсальная камера, используйте поле «URL кадра» (still_image_url):
+#   http://172.30.32.1:8100/snapshot/<имя>
+#
+# Замените имена сущностей на свои (таблица сущностей — в панели аддона
+# и в атрибутах каждой сущности: bridge_snapshot / bridge_mjpeg).
+
+type: grid
+columns: 2
+square: false
+cards:
+  # --- живые виды (mjpeg-поток моста через сущность интеграции) ---
+  - type: picture-entity
+    entity: camera.smart_access_bridge_prud
+    name: Пруд
+    camera_view: auto
+    show_state: false
+  - type: picture-entity
+    entity: camera.smart_access_bridge_tatyanin_park
+    name: Татьянин парк
+    camera_view: auto
+    show_state: false
+  - type: picture-entity
+    entity: camera.smart_access_bridge_kalitka
+    name: Калитка
+    camera_view: auto
+    show_state: false
+
+  # --- кнопка «Обучить»: допуск по кадру с калитки (сервис интеграции) ---
+  - type: button
+    name: Обучить (калитка)
+    icon: mdi:face-recognition
+    entity: camera.smart_access_bridge_kalitka
+    tap_action:
+      action: call-service
+      service: smart_access.enroll
+      data:
+        entity_id: camera.smart_access_bridge_kalitka
+        subject: Я
+        kind: face
+
+  # --- шлагбаум: открыть калитку вручную (пример из gate_hikvision.yaml) ---
+  # - type: button
+  #   name: Открыть калитку
+  #   icon: mdi:door-open
+  #   tap_action:
+  #     action: call-service
+  #     service: switch.turn_on
+  #     target:
+  #       entity_id: switch.door_door_relay_0

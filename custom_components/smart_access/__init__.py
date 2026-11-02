@@ -45,14 +45,16 @@ from .const import (
     TOPIC_ENROLL_FACE,
     TOPIC_EVENT,
     TOPIC_STATUS,
+    CONF_BRIDGE_URL,
     CONF_CAR_SUBJECTS,
     CONF_FACE_SUBJECTS,
     CONF_ENROLL_MAP,
+    DEFAULT_BRIDGE_URL,
 )
 
 LOG = logging.getLogger(__name__)
 
-PLATFORMS = ["sensor"]
+PLATFORMS = ["sensor", "camera"]
 
 SERVICE_ENROLL = "enroll"
 SERVICE_IDENTIFY = "identify"
@@ -170,6 +172,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_FACE_SUBJECTS: entry.options.get(CONF_FACE_SUBJECTS, "Я, Жена, Сын, Дочь"),
         CONF_ENROLL_MAP: entry.options.get(CONF_ENROLL_MAP, ""),
     }
+    # v1.4.0: адрес моста для сущностей camera.smart_access_* (платформа camera)
+    data["bridge_url"] = str(
+        entry.options.get(CONF_BRIDGE_URL, DEFAULT_BRIDGE_URL)
+    ).strip().rstrip("/") or DEFAULT_BRIDGE_URL
 
     # сервисы могли не зарегистрироваться в async_setup (например интеграция
     # обновлена поверх работающего HA) — страхуемся
@@ -182,6 +188,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except ValueError:
             return
         data["status"] = payload
+        # v1.4.0: список камер моста — платформа camera создаёт по нему сущности
+        if isinstance(payload.get("cameras"), list):
+            data["cameras"] = payload["cameras"]
         async_dispatcher_send(hass, SIGNAL_STATUS, payload)
 
     @callback

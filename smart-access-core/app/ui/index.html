@@ -286,21 +286,25 @@ async function refresh() {
     const cur = sel.value;
     sel.innerHTML = '<option value="">все камеры</option>' + Object.keys(st.bridge||{}).map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
     sel.value = cur;
-    // v1.3.0: подсказка «один получатель»: как переключить карточки HA на мост
+    // v1.4.0: карточки HA — сущности интеграции camera.smart_access_bridge_*
     const hc = Object.values(st.bridge||{}).filter(c=>c.url);
+    const snapUrl = c => (c.url||'').replace('/mjpeg/', '/snapshot/');
     $('clientHint').innerHTML = hc.length ? `
       <p>У каждой камеры — <b>один получатель</b>: мост Smart Access (режимы:
       <span class="pill ok">снимки</span> — быстрые одиночные снимки;
       <span class="pill">поток HA · одна сессия</span> — одно постоянное соединение вместо
-      опроса; <span class="pill ok">RTSP: мост читает сам</span>). Чтобы HA не открывал
-      к камере вторую сессию, карточку камеры переключите на мост —
-      <b>Настройки → Устройства и службы → Универсальная камера</b> (у камеры из
-      интеграций выключите её поток в карточке):</p>
-      <table><tr><th>Камера</th><th>URL потока для карточки HA</th></tr>
-      ${hc.map(c=>`<tr><td><b>${esc(c.display||c.entity||'')}</b></td><td><code>${esc(c.url)}</code></td></tr>`).join('')}
+      опроса; <span class="pill ok">RTSP: мост читает сам</span>).</p>
+      <p>Карточки в HA: обновите интеграцию Smart Access (HACS) до 1.4.0+ и перезапустите
+      HA — в ней автоматически появятся сущности <b>camera.smart_access_bridge_&lt;имя&gt;</b>
+      (картинка идёт с моста, вторых сессий к камере нет). Запасной вариант для
+      «Универсальной камеры» — поле «URL кадра» (still_image_url):</p>
+      <table><tr><th>Камера</th><th>Сущность интеграции</th><th>URL кадра (still_image_url)</th></tr>
+      ${hc.map(c=>`<tr><td><b>${esc(c.display||c.name||c.entity||'')}</b></td><td><code>camera.smart_access_bridge_${esc(c.name||'')}</code></td><td><code>${esc(snapUrl(c))}</code></td></tr>`).join('')}
       </table>
-      <p class="muted">Для локальной камеры лучший вариант — впишите ей <b>rtsp_url</b> в
-      настройках аддона: мост сам прочитает RTSP (полный fps) и раздаст всем.</p>`
+      <p class="muted">Ссылку /mjpeg/… в поле «Поток» Универсальной камеры вставлять не нужно —
+      HA не открывает multipart-поток как RTSP (карточка останется серой). Полный fps у моста
+      будет, если вписать камере <b>rtsp_url</b> в настройках аддона — тогда мост читает камеру
+      сам; облачные камеры ограничены темпом их интеграции в HA (для шлагбаума этого достаточно).</p>`
       : '<p class="muted">камеры не настроены</p>';
   } catch(e) { $('status').textContent = 'ошибка загрузки статуса: ' + (e && e.message ? e.message : e); }
 }

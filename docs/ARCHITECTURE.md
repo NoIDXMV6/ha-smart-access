@@ -3,10 +3,9 @@
 ## Компоненты (одна VM с HAOS)
 
 1. **Frigate (аддон)** — детекция объектов `car`/`person` на CPU (OpenVINO).
-   Источники видео:
-   * локальные RTSP-камеры — напрямую;
-   * облачные камеры (А.М.Видео WSS MPEG1-TS, ЕГДС — снимки) — через **мост**
-     аддона Smart Access Core (`camera_proxy` HA → MJPEG `:8100`).
+   Источники видео — ВСЕГДА мост Smart Access Core
+   (`http://172.30.32.1:8100/mjpeg/<имя>`): мост — единственный получатель
+   камеры (режимы rtsp/снимки/поток HA, v1.3.0) и раздаёт кадры всем.
 
 2. **Smart Access Core (аддон)** — мозг:
    * подписка `frigate/events` (MQTT);
@@ -20,10 +19,14 @@
 
 3. **Интеграция smart_access (HACS)** — HA-оболочка:
    * сервисы `smart_access.enroll` (кнопка «Обучить» на карточках) и
-     `smart_access.identify` (тест);
+     `smart_access.identify` (тест) — регистрируются в `async_setup`, сразу
+     при старте HA (v1.2.0);
    * сенсоры: `sensor.smart_access_status`, `sensor.smart_access_last_event`;
    * события `smart_access_event` / `smart_access_ack` для автоматизаций;
-   * OptionsFlow: имена машин/людей, привязка камер.
+   * платформа `camera` (v1.4.0): сущности `camera.smart_access_bridge_<имя>`
+     по списку камер из MQTT-статуса аддона — карточки HA играют МОСТ
+     (live = байтовый прокси multipart-потока, снимок = `/snapshot/<имя>`);
+   * OptionsFlow: имена машин/людей, привязка камер, адрес моста (`bridge_url`).
 
 4. **Mosquitto** — транспорт: Frigate ↔ аддон ↔ интеграция. Всё локально.
 

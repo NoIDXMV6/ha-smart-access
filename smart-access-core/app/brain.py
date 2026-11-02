@@ -809,6 +809,14 @@ class Brain:
             },
             "cars": list(self.store.cars.keys()),
             "faces": list(self.store.faces.keys()),
+            # v1.4.0: список камер моста для интеграции — она создаёт по ним
+            # сущности camera.smart_access_<name> (карточки HA играют мост)
+            "cameras": [
+                {"name": c.get("name") or "",
+                 "display": c.get("display_name") or c.get("name") or "",
+                 "entity": c.get("ha_entity") or ""}
+                for c in (cfg.CONF.cameras or [])
+            ],
             "last_grant": self.stats["last_grant"],
             "gestures": {
                 "enabled": bool((cfg.CONF.gestures or {}).get("enabled")),

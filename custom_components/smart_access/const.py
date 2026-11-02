@@ -18,3 +18,9 @@ EVENT_ACK = f"{DOMAIN}_ack"
 CONF_CAR_SUBJECTS = "car_subjects"
 CONF_FACE_SUBJECTS = "face_subjects"
 CONF_ENROLL_MAP = "enroll_map"
+
+# v1.4.0: базовый адрес моста (сайт аддона на :8100), откуда интеграция
+# берёт кадры/поток для сущностей camera.smart_access_<name>. Хост —
+# шлюз hassio-сети: HA Core и аддоны видят по нему сайт аддона Smart Access.
+CONF_BRIDGE_URL = "bridge_url"
+DEFAULT_BRIDGE_URL = "http://172.30.32.1:8100"

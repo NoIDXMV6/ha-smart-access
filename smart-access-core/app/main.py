@@ -126,6 +126,7 @@ async def main() -> None:
             "mqtt_host": conf.mqtt.get("host") or "core-mosquitto",
             "bridge": {
                 c["name"]: {
+                    "name": c["name"],
                     "entity": c.get("ha_entity"),
                     "display": c.get("display_name") or "",
                     # v1.3.0: rtsp_url — источник моста, Frigate всегда читает мост

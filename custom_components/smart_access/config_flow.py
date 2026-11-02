@@ -6,7 +6,14 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 
-from .const import CONF_CAR_SUBJECTS, CONF_ENROLL_MAP, CONF_FACE_SUBJECTS, DOMAIN
+from .const import (
+    CONF_BRIDGE_URL,
+    CONF_CAR_SUBJECTS,
+    CONF_ENROLL_MAP,
+    CONF_FACE_SUBJECTS,
+    DEFAULT_BRIDGE_URL,
+    DOMAIN,
+)
 
 
 class SmartAccessConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -53,6 +60,13 @@ class SmartAccessOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_ENROLL_MAP,
                         description={"suggested_value": opts.get(CONF_ENROLL_MAP, "")},
+                    ): str,
+                    # v1.4.0: адрес моста для сущностей camera.smart_access_*
+                    vol.Optional(
+                        CONF_BRIDGE_URL,
+                        description={
+                            "suggested_value": opts.get(CONF_BRIDGE_URL, DEFAULT_BRIDGE_URL)
+                        },
                     ): str,
                 }
             ),

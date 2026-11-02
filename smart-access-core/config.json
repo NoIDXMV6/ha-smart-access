@@ -1,6 +1,6 @@
 {
   "name": "Smart Access Core",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "slug": "smart-access-core",
   "description": "Умный допуск на одной VM с HAOS: авто-открытие шлагбаумов по своим машинам и калитки по лицам. LLM — только внешний URL+token+модель (опционально).",
   "url": "https://github.com/NoIDXMV6/ha-smart-access",
@@ -9,7 +9,7 @@
   "startup": "application",
   "boot": "auto",
   "init": false,
-  "watchdog": true,
+  "watchdog": "http://[HOST]:[PORT:8099]",
   "hassio_api": true,
   "hassio_role": "manager",
   "homeassistant_api": true,

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any
 
 LOG = logging.getLogger("smart_access.config")
@@ -13,6 +14,37 @@ DATA_DIR = os.environ.get("SMART_ACCESS_DATA_DIR", "/data")
 MEDIA_DIR = os.environ.get("SMART_ACCESS_MEDIA_DIR", "/media/smart_access")
 
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
+
+# База Supervisor API определяется один раз и кэшируется
+_SV_BASE: dict[str, Any] = {"url": None, "ts": 0.0, "fail_ts": 0.0}
+
+
+def supervisor_base() -> str:
+    """База Supervisor API: http://supervisor или IP-алиас 172.30.32.2.
+
+    Имя 'supervisor' резолвится docker-DNS внутри моста hassio; из
+    host-network окружения (наш аддон) оно может быть недоступно — тогда
+    используем известный IP Supervisor в hassio-сети.
+    """
+    now = time.time()
+    if _SV_BASE["url"] and now - _SV_BASE["ts"] < 600:
+        return _SV_BASE["url"]
+    if _SV_BASE["fail_ts"] and now - _SV_BASE["fail_ts"] < 30:
+        return "http://supervisor"  # недавно оба варианта не ответили — не долбим
+    import requests
+    headers = {"Authorization": f"Bearer {SUPERVISOR_TOKEN}"} if SUPERVISOR_TOKEN else {}
+    for base in ("http://supervisor", "http://172.30.32.2"):
+        try:
+            # любой ответ (даже 401) доказывает достижимость
+            requests.get(f"{base}/addons", headers=headers, timeout=3)
+            _SV_BASE.update({"url": base, "ts": now})
+            if base != "http://supervisor":
+                LOG.info("Supervisor API доступен по IP-алиасу %s (имя 'supervisor' не резолвится)", base)
+            return base
+        except Exception:  # noqa: BLE001
+            continue
+    _SV_BASE["fail_ts"] = now
+    return "http://supervisor"
 
 
 def _read_options() -> dict[str, Any]:
@@ -83,14 +115,25 @@ class Config:
         self.recognition: dict[str, Any] = opts["recognition"]
         self.vlm: dict[str, Any] = opts["vlm"]
 
-        # MQTT: если в опциях пусто — берём креды брокера у Supervisor (сервис mqtt:want),
-        # это же работает и когда аддон подключают к внешнему брокеру через опции.
-        if not self.mqtt.get("host"):
+        # MQTT: если в опциях пусто или указан localhost (а наш аддон работает
+        # в host_network), берём адрес/креды брокера у Supervisor (сервис mqtt:want).
+        # Имя core-mosquitto из host_network не резолвится — слушаем
+        # опубликованный на хосте порт по 127.0.0.1.
+        host = str(self.mqtt.get("host") or "").strip()
+        if host in ("", "localhost", "127.0.0.1", "::1"):
             svc = discover_mqtt_service()
             if svc:
-                self.mqtt = {**self.mqtt, **svc}
-                LOG.info("MQTT получен из Supervisor: %s:%s (user=%s)",
-                         svc.get("host"), svc.get("port"), svc.get("user") or "-")
+                self.mqtt = {
+                    **self.mqtt,
+                    "host": "127.0.0.1",
+                    "port": svc.get("port") or self.mqtt.get("port") or 1883,
+                    "user": self.mqtt.get("user") or svc.get("user") or "",
+                    "password": self.mqtt.get("password") or svc.get("password") or "",
+                }
+                LOG.info("MQTT: брокер обнаружен через Supervisor: 127.0.0.1:%s (user=%s)",
+                         self.mqtt["port"], self.mqtt["user"] or "-")
+            elif host in ("", "localhost"):
+                self.mqtt = {**self.mqtt, "host": "127.0.0.1"}
 
     def camera_by_name(self, name: str) -> dict[str, Any] | None:
         for cam in self.cameras:
@@ -130,7 +173,7 @@ def discover_mqtt_service() -> dict[str, Any] | None:
 
     try:
         resp = requests.get(
-            "http://supervisor/services/mqtt",
+            f"{supervisor_base()}/services/mqtt",
             headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}"},
             timeout=5,
         )

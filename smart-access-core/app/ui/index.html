@@ -111,7 +111,7 @@ async function refresh() {
       `<table><tr><th>Камера</th><th>HA-сущность</th><th>Состояние</th><th>Источник для Frigate</th></tr>${rows}</table>
        <p>Модели: ${Object.entries(st.models).map(([k,v])=>`<span class="pill ${v==='ok'?'ok':'err'}">${k}: ${esc(v)}</span>`).join(' ')}
        &nbsp; Frigate: ${st.frigate?'<span class="pill ok">связь есть'+(st.frigate_version?` · v${esc(st.frigate_version)}`:'')+'</span>':'<span class="pill err">нет связи</span>'}
-       &nbsp; MQTT: ${esc(st.mqtt_host)}
+       &nbsp; MQTT: ${esc(st.mqtt_host)} ${(st.stats&&st.stats.mqtt==='ok')?'<span class="pill ok">подключено</span>':(st.stats&&st.stats.mqtt?`<span class="pill err">${esc(st.stats.mqtt)}</span>`:'')}
        &nbsp; Событий: ${st.stats.events_seen}, допусков: ${st.stats.grants}, отказов: ${st.stats.denied}, VLM: ${st.stats.vlm_calls}</p>`
        + (st.frigate_error ? `<p class="frigate-warn">⚠ ${esc(st.frigate_error)}</p>` : '');
   } catch(e) { $('status').textContent = 'ошибка загрузки статуса: ' + (e && e.message ? e.message : e); }

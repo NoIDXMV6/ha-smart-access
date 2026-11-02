@@ -51,6 +51,7 @@ class Brain:
         self.stats: dict[str, Any] = {
             "events_seen": 0, "grants": 0, "denied": 0,
             "vlm_calls": 0, "last_grant": None, "started": time.time(),
+            "mqtt": "подключение…",
         }
         self._seen_events: dict[str, float] = {}
         self._confirm: dict[str, dict[str, float]] = {}  # event_id -> {subject, count, score}
@@ -82,12 +83,14 @@ class Brain:
 
     def _on_connect(self, client, _u, _f, rc, _p=None):  # noqa: ANN001
         LOG.info("MQTT: подключено (rc=%s)", rc)
+        self.stats["mqtt"] = "ok" if rc == 0 else f"ошибка брокера (rc={rc})"
         client.subscribe("frigate/events", qos=1)
         client.subscribe("smart_access/enroll/#", qos=1)
         client.subscribe("smart_access/cmd/#", qos=1)
         self.publish_status()
 
     def _on_disconnect(self, *_a, **_k):  # noqa: ANN001
+        self.stats["mqtt"] = "нет связи"
         LOG.warning("MQTT: отключение — авто-реконнект")
 
     def _on_message(self, _c, _u, msg: mqtt.MQTTMessage):  # noqa: ANN001

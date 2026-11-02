@@ -5,15 +5,31 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
+import os
+import socket
+import struct
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import requests
 
 from . import config as cfg
 
+try:  # Frigate 0.16+ по умолчанию включает TLS на 8971 с self-signed сертификатом
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except Exception:  # noqa: BLE001
+    pass
+
 LOG = logging.getLogger("smart_access.ha")
+
+
+def _sv_get(path: str, timeout: int = 8) -> requests.Response:
+    """GET к Supervisor API (база определяется автоматически)."""
+    return requests.get(f"{cfg.supervisor_base()}{path}", headers=_headers(), timeout=timeout)
 
 
 def _headers() -> dict[str, str]:
@@ -26,7 +42,7 @@ def call_ha_service(domain: str, service: str, data: dict[str, Any] | None = Non
     if not cfg.SUPERVISOR_TOKEN:
         LOG.error("SUPERVISOR_TOKEN отсутствует — вызов сервиса %s.%s невозможен", domain, service)
         return False
-    url = f"http://supervisor/core/api/services/{domain}/{service}"
+    url = f"{cfg.supervisor_base()}/core/api/services/{domain}/{service}"
     payload = data or {}
     for attempt in range(1, retries + 1):
         try:
@@ -47,7 +63,7 @@ def get_camera_image(entity_id: str) -> bytes | None:
         return None
     try:
         resp = requests.get(
-            f"http://supervisor/core/api/camera_proxy/{entity_id}",
+            f"{cfg.supervisor_base()}/core/api/camera_proxy/{entity_id}",
             headers=_headers(),
             timeout=12,
         )
@@ -64,7 +80,7 @@ def get_ha_state(entity_id: str) -> dict[str, Any] | None:
         return None
     try:
         resp = requests.get(
-            f"http://supervisor/core/api/states/{entity_id}",
+            f"{cfg.supervisor_base()}/core/api/states/{entity_id}",
             headers=_headers(), timeout=8,
         )
         if resp.ok:
@@ -83,7 +99,9 @@ def get_ha_state(entity_id: str) -> dict[str, Any] | None:
 _FRIGATE_PORT_CANDIDATES = (8971, 5000)
 _DETECTED_TTL = 600.0  # сколько секунд доверяем автоматически найденному адресу
 
-_detected: dict[str, Any] = {"url": None, "ts": 0.0}
+_detected: dict[str, Any] = {"url": None, "ts": 0.0, "version": None}
+_last_scan: dict[str, float] = {"ts": 0.0}
+_SCAN_MIN_INTERVAL = 60.0  # между полными сканами внутренней сети
 
 
 def _frigate_version(url: str, timeout: float = 4.0) -> dict[str, Any]:
@@ -91,32 +109,179 @@ def _frigate_version(url: str, timeout: float = 4.0) -> dict[str, Any]:
 
     kind: ok | refused | timeout | html | http | unreachable.
     HTML-страница вместо JSON — это НЕ Frigate API (чужая служба на порту
-    или включённая аутентификация Frigate).
+    или включённая аутентификация Frigate). Если по http получена SSL-ошибка
+    или ответ «это HTTPS-сервер» — повторяем по https (Frigate 0.16+ включает
+    TLS на 8971 по умолчанию, сертификат self-signed).
     """
-    try:
-        resp = requests.get(f"{url}/api/version", timeout=timeout)
-    except requests.RequestException as exc:
-        s = str(exc).lower()
-        if "refused" in s:
-            kind = "refused"
-        elif "timed out" in s or "timeout" in s:
-            kind = "timeout"
-        else:
-            kind = "unreachable"
-        return {"ok": False, "version": None, "kind": kind, "error": str(exc)}
-    ctype = resp.headers.get("content-type", "")
-    if resp.ok:
+    attempts = [("http", url)]
+    if url.startswith("http://"):
+        attempts.append(("https", "https://" + url[len("http://"):]))
+    last: dict[str, Any] | None = None
+    for scheme, base in attempts:
         try:
-            version = str(resp.json()).strip().strip('"')
+            resp = requests.get(f"{base}/api/version", timeout=timeout, verify=False)
+        except requests.exceptions.SSLError as exc:
+            last = {"ok": False, "version": None, "kind": "ssl", "error": str(exc)}
+            continue  # пробуем следующую схему
+        except requests.RequestException as exc:
+            s = str(exc).lower()
+            if "refused" in s:
+                kind = "refused"
+            elif "timed out" in s or "timeout" in s:
+                kind = "timeout"
+            else:
+                kind = "unreachable"
+            last = {"ok": False, "version": None, "kind": kind, "error": str(exc)}
+            # сброс соединения на HTTP-запрос — типичный признак TLS-порта:
+            # пробуем следующую схему (https), иначе — соединения нет
+            if ("aborted" in s or "reset" in s) and scheme == "http":
+                continue
+            break  # refused/timeout — https не спасёт
+        if resp.status_code == 400 and b"HTTPS server" in resp.content[:200]:
+            last = {"ok": False, "version": None, "kind": "ssl",
+                    "error": "порт отвечает только по HTTPS"}
+            continue
+        ctype = resp.headers.get("content-type", "")
+        if resp.ok:
+            try:
+                version = str(resp.json()).strip().strip('"')
+            except ValueError:
+                last = {"ok": False, "version": None, "kind": "html",
+                        "error": f"HTTP 200, но тело не JSON ({ctype or 'без content-type'})"}
+                break
+            return {"ok": True, "version": version, "kind": "ok", "error": None}
+        if "text/html" in ctype:
+            last = {"ok": False, "version": None, "kind": "html",
+                    "error": f"HTML-страница вместо API (HTTP {resp.status_code})"}
+            break
+        last = {"ok": False, "version": None, "kind": "http",
+                "error": f"HTTP {resp.status_code} ({ctype or 'без content-type'})"}
+        break
+    return last or {"ok": False, "version": None, "kind": "unreachable", "error": "no attempt"}
+
+
+def _supervisor_frigate_addons() -> list[dict[str, str]] | None:
+    """Аддоны, похожие на Frigate, через Supervisor API.
+
+    None — Supervisor недоступен (нет токена/сети); [] — аддон не найден.
+    """
+    if not cfg.SUPERVISOR_TOKEN:
+        return None
+    try:
+        resp = _sv_get("/addons", timeout=6)
+        if not resp.ok:
+            return None
+        addons = resp.json().get("data", {}).get("addons", []) or []
+    except Exception:  # noqa: BLE001
+        return None
+    out: list[dict[str, str]] = []
+    for a in addons:
+        hay = f"{a.get('slug', '')} {a.get('name', '')}".lower()
+        if "frigate" in hay:
+            out.append({"name": a.get("name") or a.get("slug") or "Frigate",
+                        "state": a.get("state") or "?",
+                        "version": a.get("version") or ""})
+    return out
+
+
+def _bridge_subnets() -> list[Any]:
+    """Подсети docker-мостов (в них живут аддоны: Frigate и др.).
+
+    Источники: env SMART_ACCESS_BRIDGE_SUBNETS (например
+    '172.30.32.0/23,10.55.0.0/24'), затем /proc/net/route (интерфейсы br-*).
+    Дефолт — стандартная hassio-сеть 172.30.32.0/23.
+    """
+    nets: list[Any] = []
+    env = os.environ.get("SMART_ACCESS_BRIDGE_SUBNETS", "").strip()
+    if env:
+        for part in env.split(","):
+            try:
+                n = ipaddress.ip_network(part.strip())
+                if n.num_addresses <= 1024:
+                    nets.append(n)
+            except ValueError:
+                pass
+        if nets:
+            return nets[:2]
+    try:
+        with open("/proc/net/route", encoding="ascii") as fh:
+            for line in fh.readlines()[1:]:
+                f = line.split()
+                if not f or not f[0].startswith("br-"):
+                    continue
+                try:
+                    dst = socket.inet_ntoa(struct.pack("<I", int(f[1], 16)))
+                    mask = socket.inet_ntoa(struct.pack("<I", int(f[7], 16)))
+                    net = ipaddress.ip_network(f"{dst}/{mask}", strict=False)
+                    if net.num_addresses <= 1024 and net not in nets:
+                        nets.append(net)
+                except (ValueError, OSError, ipaddress.AddressValueError):
+                    continue
+    except OSError:
+        pass
+    default = ipaddress.ip_network("172.30.32.0/23")
+    if not any(n.overlaps(default) for n in nets):
+        nets.append(default)
+    return nets[:2]
+
+
+def _scan_bridge(subnets: list[Any] | None = None) -> str | None:
+    """Ищет Frigate по портам 5000/8971 в подсетях docker-мостов.
+
+    Из host-network аддона контейнерные IP моста доступны напрямую —
+    публикация портов на хост для этого не нужна. Возвращает
+    'http://IP:PORT' или None.
+    """
+    nets = subnets if subnets is not None else _bridge_subnets()
+    targets: list[tuple[str, int]] = []
+    for net in nets:
+        try:
+            for h in net.hosts():
+                for p in _FRIGATE_PORT_CANDIDATES:
+                    targets.append((str(h), p))
         except ValueError:
-            return {"ok": False, "version": None, "kind": "html",
-                    "error": f"HTTP 200, но тело не JSON ({ctype or 'без content-type'})"}
-        return {"ok": True, "version": version, "kind": "ok", "error": None}
-    if "text/html" in ctype:
-        return {"ok": False, "version": None, "kind": "html",
-                "error": f"HTML-страница вместо API (HTTP {resp.status_code})"}
-    return {"ok": False, "version": None, "kind": "http",
-            "error": f"HTTP {resp.status_code} ({ctype or 'без content-type'})"}
+            continue
+    if not targets or len(targets) > 2048:
+        return None
+
+    def _tcp_probe(t: tuple[str, int]) -> tuple[str, int] | None:
+        ip, p = t
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.35)
+        try:
+            return t if s.connect_ex((ip, p)) == 0 else None
+        finally:
+            s.close()
+
+    opens: list[tuple[str, int]] = []
+    with ThreadPoolExecutor(max_workers=64) as ex:
+        for r in ex.map(_tcp_probe, targets):
+            if r:
+                opens.append(r)
+    # порт 5000 (API без аутентификации) приоритетнее 8971 (UI/TLS)
+    for ip, p in sorted(opens, key=lambda t: 0 if t[1] == 5000 else 1):
+        res = _frigate_version(f"http://{ip}:{p}", timeout=2.5)
+        if res["ok"]:
+            LOG.info("Frigate найден во внутренней сети аддонов: http://%s:%s (v%s)",
+                     ip, p, res["version"])
+            return f"http://{ip}:{p}"
+    return None
+
+
+def _find_frigate() -> tuple[str | None, str | None]:
+    """Рабочий адрес Frigate: кэш, иначе скан внутренней сети (с троттлингом)."""
+    det = _detected["url"]
+    if det and time.time() - _detected["ts"] < _DETECTED_TTL:
+        return det, _detected.get("version")
+    if time.time() - _last_scan["ts"] < _SCAN_MIN_INTERVAL:
+        return None, None
+    _last_scan["ts"] = time.time()
+    url = _scan_bridge()
+    if url:
+        res = _frigate_version(url, timeout=2.5)
+        _detected.update({"url": url, "ts": time.time(), "version": res.get("version")})
+        return url, res.get("version")
+    return None, None
 
 
 def frigate_probe(frigate_url: str) -> dict[str, Any]:
@@ -132,8 +297,7 @@ def frigate_probe(frigate_url: str) -> dict[str, Any]:
     """
     first = _frigate_version(frigate_url)
     if first["ok"]:
-        _detected["url"] = frigate_url
-        _detected["ts"] = time.time()
+        _detected.update({"url": frigate_url, "ts": time.time(), "version": first["version"]})
         return {"ok": True, "error": None, "version": first["version"], "detected_url": None}
 
     # настроенный адрес не работает — ищем Frigate на типовых портах того же хоста
@@ -158,8 +322,7 @@ def frigate_probe(frigate_url: str) -> dict[str, Any]:
             html_cand = f"{cand} ({res['error']})"
 
     if detected_url:
-        _detected["url"] = detected_url
-        _detected["ts"] = time.time()
+        _detected.update({"url": detected_url, "ts": time.time(), "version": version})
         return {
             "ok": True,
             "error": (f"Frigate найден автоматически на {detected_url} (версия {version}); "
@@ -168,6 +331,21 @@ def frigate_probe(frigate_url: str) -> dict[str, Any]:
                       "чтобы закрепить адрес."),
             "version": version,
             "detected_url": detected_url,
+        }
+
+    # внешние порты не помогли — ищем Frigate по внутренней сети аддонов
+    # (IP контейнера в docker-мосту, публикация портов не нужна)
+    bridge_url, bridge_ver = _find_frigate()
+    if bridge_url:
+        return {
+            "ok": True,
+            "error": (f"Frigate найден по внутренней сети аддонов: {bridge_url} "
+                      f"(версия {bridge_ver}); настроенный {frigate_url} не работает: "
+                      f"{first['error']}. Система уже использует найденный адрес "
+                      "(IP контейнера может смениться при перезапуске — Smart Access "
+                      "найдёт его заново); впишите его в Frigate URL, чтобы закрепить."),
+            "version": bridge_ver,
+            "detected_url": bridge_url,
         }
 
     kind = first["kind"]
@@ -195,6 +373,28 @@ def frigate_probe(frigate_url: str) -> dict[str, Any]:
                   "аутентификацией — отключите её (auth: enabled: false).")
     elif candidates:
         extra += f" Дополнительно проверен(ы) {', '.join(candidates)} — Frigate API там нет."
+
+    # диагностика через Supervisor API: установлен ли аддон Frigate и запущен ли
+    addons = _supervisor_frigate_addons()
+    if addons:
+        started = [a for a in addons if a["state"] == "started"]
+        if started:
+            names = "; ".join(f"«{a['name']}» v{a['version']}" for a in started)
+            extra += (f" Аддон Frigate запущен ({names}), но его API не найден ни на "
+                      "настроенном адресе, ни на внешних портах хоста, ни во внутренней "
+                      "сети аддонов. Откройте вкладку «Журнал» аддона Frigate — вероятно, "
+                      "он падает при старте (частая причина: ошибка в config.yml); также "
+                      "проверьте, что настройки портов в разделе сети сохранены.")
+        else:
+            states = "; ".join(f"«{a['name']}» — {a['state']}" for a in addons)
+            extra += (f" Через Supervisor API найден аддон Frigate: {states}. "
+                      "Запустите его (Настройки → Аддоны → Frigate → Запустить), "
+                      "затем обновите статус.")
+    elif addons == []:
+        extra += (" Через Supervisor API установленный аддон Frigate не найден. "
+                  "Если Frigate работает на отдельном сервере/Docker — укажите его "
+                  "адрес: http://<IP-сервера>:5000.")
+
     return {"ok": False,
             "error": f"Нет связи с {frigate_url}/api/version: {first['error']}.{hint}{extra}",
             "version": None, "detected_url": None}
@@ -234,7 +434,10 @@ def frigate_event_snapshot(frigate_url: str, event_id: str, crop: bool = True) -
     jpg = _snapshot_get(frigate_url, event_id, crop)
     if jpg is None:
         alt = frigate_effective_url(frigate_url)
-        if alt != frigate_url:
+        if alt == frigate_url:
+            found, _ver = _find_frigate()  # троттлинг внутри
+            alt = found or ""
+        if alt and alt != frigate_url:
             jpg = _snapshot_get(alt, event_id, crop)
     return jpg
 

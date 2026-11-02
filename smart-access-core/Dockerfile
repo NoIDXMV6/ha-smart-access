@@ -30,3 +30,9 @@ RUN ls -la /models
 ENV PYTHONPATH=/app
 COPY app /app/app
 WORKDIR /app/app
+
+# run.sh — главная служба контейнера: s6-overlay v3 (PID 1 при "init": false
+# в config.json) сам запускает CMD как обычный процесс.
+COPY run.sh /run.sh
+RUN chmod a+x /run.sh
+CMD ["/run.sh"]

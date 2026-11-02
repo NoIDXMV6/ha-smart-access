@@ -1,3 +1,14 @@
+# 1.1.4
+
+- Исправление crash loop `s6-overlay-suexec: fatal: can only run as pid 1`:
+  Supervisor по умолчанию запускает контейнер аддона с docker `--init` (tini
+  становится PID 1), а s6-overlay из базового образа HA обязан быть PID 1 —
+  контейнер умирал мгновенно, до Python дело не доходило. Добавлены
+  `"init": false` (s6 становится PID 1) и `"watchdog": true` (авто-рестарт
+  при падении).
+- run.sh подключён как главная служба: `COPY run.sh /run.sh` +
+  `CMD ["/run.sh"]` — s6-overlay v3 запускает CMD автоматически.
+
 # 1.1.3
 
 - Исправление падения при старте (crash loop): код копировался в образ плоско

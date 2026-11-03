@@ -661,21 +661,54 @@ class Brain:
     # ---------------- enrollment ----------------
 
     def _handle_enroll(self, kind: str, payload: bytes) -> None:
+        """Обучение от интеграции (кнопка «Обучить» на карточках HA).
+
+        v1.4.1: у цепочки теперь ЕСТЬ обратная связь. Раньше результат
+        `enroll()` выбрасывался: любая неудача (лицо на кадре не найдено,
+        модель недоступна, битый payload) исчезала молча — в HA «ошибки нет»,
+        а фото в панели не появлялось, и пользователь не мог понять почему.
+        Теперь любой исход завершается:
+          * ack в smart_access/ack — интеграция показывает результат в HA
+            (уведомление + событие smart_access_ack для автоматизаций);
+          * событие в журнале панели (вкладка «Журнал»): enrolled /
+            enroll_failed с причиной;
+          * WARNING в журнале аддона.
+        """
+        entity = ""
+        subject = ""
         try:
             data = json.loads(payload)
-        except ValueError:
-            return
-        subject = str(data.get("subject") or "").strip()
-        image_b64 = str(data.get("image_b64") or "")
-        if not subject or not image_b64:
-            return
-        import base64
+            subject = str(data.get("subject") or "").strip()
+            entity = str(data.get("entity_id") or "").strip()
+            image_b64 = str(data.get("image_b64") or "")
+            if not subject:
+                raise ValueError("не указано имя (subject)")
+            if not image_b64:
+                raise ValueError("нет изображения (image_b64)")
+            import base64
 
-        try:
             jpg = base64.b64decode(image_b64.split(",")[-1])
-        except Exception:  # noqa: BLE001
+            if not jpg:
+                raise ValueError("пустое изображение после декодирования")
+        except Exception as exc:  # noqa: BLE001
+            err = f"битый запрос обучения: {exc}"
+            LOG.warning("Enroll (%s): %s", kind, err)
+            self._log_event(kind if kind in ("car", "face") else "car",
+                            entity or "enroll", "enroll_failed", err, 0, subject or None)
+            self._ack({"cmd": "enroll", "ok": False, "kind": kind, "subject": subject,
+                       "entity_id": entity, "error": err})
             return
-        self.enroll(kind, subject, jpg)
+
+        result = self.enroll(kind, subject, jpg)
+        if result.get("ok"):
+            self._ack({"cmd": "enroll", "ok": True, "kind": kind, "subject": subject,
+                       "entity_id": entity, "added": int(result.get("added") or 0)})
+            return
+        err = str(result.get("error") or "неизвестная ошибка")
+        LOG.warning("Enroll %s «%s» (%s): НЕ ВЫПОЛНЕНО — %s", kind, subject, entity or "?", err)
+        self._log_event(kind, entity or "enroll", "enroll_failed", err, 0, subject)
+        self._ack({"cmd": "enroll", "ok": False, "kind": kind, "subject": subject,
+                   "entity_id": entity, "error": err})
 
     def enroll(self, kind: str, subject: str, jpg: bytes) -> dict[str, Any]:
         if kind not in ("car", "face"):

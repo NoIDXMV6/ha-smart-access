@@ -319,6 +319,10 @@ async function toggleMaster() {
 /* ---------- машины / лица ---------- */
 const KINDS = { car: {title:'Машины («свои» на шлагбаум)', hint:'Сфотографируйте машину с камеры шлагбаума или загрузите файлы. Система сама сделает 8 вариантов (ночь/дождь/снег/контражур) — это «пре-трейн» базы.'},
                 face: {title:'Лица (калитка/дверь)', hint:'Крупное фото лица анфас, можно несколько файлов сразу. Добавляйте 2–3 фото с разных ракурсов на человека.'} };
+// v1.4.1: подпись последнего отрендеренного списка — для автообновления
+// (фото, добавленные кнопкой «Обучить» из карточек HA, появляются в панели
+// без перезахода, но только когда данные реально изменились)
+const _lastSubjects = {car: '', face: ''};
 
 async function renderSubjectsPane(kind) {
   // v1.3.0: id панелей — МНОЖЕСТВЕННЫЕ (pane-cars / pane-faces), а kind —
@@ -329,6 +333,7 @@ async function renderSubjectsPane(kind) {
   if (!pane) return;
   let map = {};
   try { map = (await (await fetch(API('api/subjects'))).json())[kind + 's'] || {}; } catch(e) {}
+  _lastSubjects[kind] = JSON.stringify(map);
   const list = Object.entries(map).map(([name, info]) => {
     const thumb = info.thumb ? API(`api/photo/${kind}/${encodeURIComponent(name)}/${encodeURIComponent(info.thumb)}`) : '';
     return `<div class="subj">
@@ -681,7 +686,8 @@ async function loadJournal() {
   const actPill = (a) => {
     if (a === 'alarm') return '<span class="pill alarm">ТРЕВОГА</span>';
     const m = {opened:'ok', detected:'ok', enrolled:'ok', retrained:'ok',
-               unknown:'warn', gesture_wait:'warn', denied:'err'};
+               unknown:'warn', gesture_wait:'warn', denied:'err',
+               enroll_failed:'err'};
     return `<span class="pill ${m[a]||''}">${esc(a)}</span>`;
   };
   $('events').innerHTML = ev.map(e =>
@@ -717,7 +723,35 @@ async function clearEvents() {
 /* ---------- конфиг frigate ---------- */
 async function loadFrigate() { $('frigateCfg').value = await (await fetch(API('api/frigate-config'))).text(); }
 
+/* v1.4.1: автообновление активной вкладки. Кнопка «Обучить» на карточках HA
+   добавляет фото в базу через MQTT — панель показывает это сама, без
+   перезахода. Рендер только при изменении данных и не при вводе пользователя
+   (чтобы не сбивать набор имени и выбор файла). */
+async function autoRefreshActivePane() {
+  const active = document.querySelector('#tabs button.active');
+  if (!active) return;
+  const t = active.dataset.t;
+  if (t === 'cars' || t === 'faces') {
+    const kind = t === 'cars' ? 'car' : 'face';
+    const pane = $('pane-' + kind + 's');
+    if (!pane) return;
+    const ae = document.activeElement;
+    if (ae && pane.contains(ae)) return;               // пользователь печатает
+    const modal = $('galleryModal');
+    if (modal && modal.style.display === 'block') return; // открыта галерея
+    let map = {};
+    try { map = (await (await fetch(API('api/subjects'))).json())[kind + 's'] || {}; } catch(e) { return; }
+    if (JSON.stringify(map) !== _lastSubjects[kind]) renderSubjectsPane(kind);
+  } else if (t === 'journal') {
+    const pane = $('pane-journal');
+    const ae = document.activeElement;
+    if (pane && ae && pane.contains(ae)) return;
+    loadJournal();
+  }
+}
+
 refresh(); refreshSettings(); loadGestures(); setInterval(refresh, 5000);
+setInterval(autoRefreshActivePane, 5000);
 </script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 {
   "name": "Smart Access Core",
-  "version": "1.4.4",
+  "version": "1.4.5",
   "slug": "smart-access-core",
   "description": "Умный допуск на одной VM с HAOS: авто-открытие шлагбаумов по своим машинам и калитки по лицам (с настраиваемыми по каждому лицу жестами и тревогой). LLM — только внешний URL+token+модель (опционально).",
   "url": "https://github.com/NoIDXMV6/ha-smart-access",

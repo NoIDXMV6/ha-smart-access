@@ -196,12 +196,20 @@ def test_versions_are_in_sync_v144():
     addon = json.loads((CORE / "config.json").read_text(encoding="utf-8"))
     manifest = json.loads((REPO / "custom_components" / "smart_access" /
                            "manifest.json").read_text(encoding="utf-8"))
-    assert addon["version"] == manifest["version"] == "1.4.4"
+    # пин ослаблен с 1.4.4 до >= 1.4: версии синхронны и не старше 1.4
+    ver = lambda v: tuple(int(x) for x in v.split("."))
+    assert ver(addon["version"]) == ver(manifest["version"]) >= (1, 4, 4)
 
 
 def test_changelog_has_v144_section():
     text = (CORE / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert text.startswith("# 1.4.4"), "CHANGELOG должен начинаться с секции 1.4.4"
-    # release.yml извлекает секцию по заголовку «# 1.4.4» — он обязан существовать
+    # секция 1.4.4 осталась в истории CHANGELOG
     assert "# 1.4.4" in text
     assert "smart-access-cards.zip" in text
+    # первая секция соответствует версии из manifest — release.yml извлекает
+    # заметки релиза по заголовку «# <версия>» (см. test_v145)
+    manifest = json.loads((REPO / "custom_components" / "smart_access" /
+                           "manifest.json").read_text(encoding="utf-8"))
+    assert text.startswith(f"# {manifest['version']}"), (
+        "первая секция CHANGELOG должна соответствовать версии manifest"
+    )

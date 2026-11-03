@@ -1,0 +1,107 @@
+# Шлагбаум «ул. Лесная» (ЕГДС) — ОБНОВЛЁННАЯ карточка (v1.4.4).
+#
+# ГЛАВНОЕ ОТЛИЧИЕ от v1.1.0: живое видео карточка берёт с МОСТА Smart Access
+# (сущность camera.smart_access_bridge_tatyanin_park), а не с Универсальной
+# камеры. У физической камеры остаётся ОДИН получатель — мост (его же читает
+# Frigate), карточка больше не открывает камере вторую сессию и не бывает серой.
+#
+# ТРЕБОВАНИЯ:
+#   1) аддон Smart Access Core 1.4.0+ запущен, камера «Татьянин парк» настроена;
+#   2) интеграция Smart Access (HACS) 1.4.0+, ПОСЛЕ обновления HA перезапущен;
+#   3) сущность моста создалась: Настройки → Устройства и службы → Сущности →
+#      поиск «smart_access» → camera.smart_access_bridge_tatyanin_park.
+#
+# ЕСЛИ СУЩНОСТИ МОСТА НЕТ:
+#   * аддон запущен? Сущности создаются из MQTT-статуса аддона (он появляется
+#     через ~30 с после старта аддона);
+#   * интеграция обновлена до 1.4.0+ и HA перезапущен?
+#   * запасной вариант: Универсальная камера с «URL кадра» (still_image_url)
+#     http://172.30.32.1:8100/snapshot/tatyanin_park — ссылку /mjpeg/… в поле
+#     «Поток» вставлять НЕ нужно (HA не понимает multipart-поток).
+#
+# ЕСЛИ КНОПКА «Обучить» ПИШЕТ «Действие smart_access.enroll не найдено»:
+#   сервис живёт в ИНТЕГРАЦИИ Smart Access — обновите её до 1.2.0+, добавьте
+#   в Настройки → Устройства и службы и перезапустите HA. С 1.4.1 кнопка
+#   показывает результат уведомлением (успех/причина отказа), исход виден и
+#   во вкладке «Журнал» панели аддона.
+#
+# ЗАМЕНИТЕ сущности, если они у вас называются иначе:
+#   camera.smart_access_bridge_tatyanin_park             — сущность моста (картинка)
+#   button.ul_lesnaia_shlagbaum_no1_otkryt               — кнопка ЕГДС «Открыть»
+#   cover.ul_lesnaia_shlagbaum_no1_shlagbaum             — состояние шлагбаума
+#   subject: Моя машина                                  — имя в базе «своих» машин
+#
+# Вставка: Панель → Изменить → Добавить карточку → Вручную → вставить → Сохранить.
+# Требуется: аддон smart-access-core + интеграция Smart Access (HACS).
+
+type: picture-elements
+camera_view: live
+camera_image: camera.smart_access_bridge_tatyanin_park
+title: Шлагбаум — ул. Лесная
+elements:
+  # Кнопка «Открыть шлагбаум» (поверх видео, справа внизу)
+  - type: state-icon
+    entity: button.ul_lesnaia_shlagbaum_no1_otkryt
+    icon: mdi:boom-gate-arrow-up-outline
+    style:
+      top: 84%
+      left: 86%
+      color: white
+      background: rgba(0, 0, 0, 0.45)
+      border-radius: 50%
+      padding: 12px
+      transform: translate(-50%, -50%)
+    tap_action:
+      action: perform-action
+      perform_action: egds.open_barrier
+      target:
+        entity_id: button.ul_lesnaia_shlagbaum_no1_otkryt
+      confirmation:
+        text: Открыть шлагбаум?
+
+  # Кнопка «Обучить» — кадр с моста в базу «своих» машин (слева от «Открыть»)
+  - type: icon
+    icon: mdi:camera-plus
+    style:
+      top: 84%
+      left: 70%
+      color: white
+      background: rgba(0, 0, 0, 0.45)
+      border-radius: 50%
+      padding: 10px
+      transform: translate(-50%, -50%)
+    tap_action:
+      action: perform-action
+      perform_action: smart_access.enroll
+      data:
+        entity_id: camera.smart_access_bridge_tatyanin_park
+        subject: Моя машина
+        kind: car
+      confirmation:
+        text: Добавить текущий кадр в базу «Моя машина»?
+
+  # Кнопка «во весь экран» — диалог с живым видео моста (слева внизу)
+  - type: icon
+    icon: mdi:arrow-expand-all
+    style:
+      top: 84%
+      left: 14%
+      color: white
+      background: rgba(0, 0, 0, 0.45)
+      border-radius: 50%
+      padding: 10px
+      transform: translate(-50%, -50%)
+    tap_action:
+      action: more-info
+      entity: camera.smart_access_bridge_tatyanin_park
+
+  # Подпись: состояние шлагбаума (Закрыто / Открывается / Открыто)
+  - type: state-label
+    entity: cover.ul_lesnaia_shlagbaum_no1_shlagbaum
+    style:
+      top: 93%
+      left: 50%
+      color: white
+      text-shadow: 0 0 4px black
+      font-size: 95%
+      transform: translate(-50%, -50%)

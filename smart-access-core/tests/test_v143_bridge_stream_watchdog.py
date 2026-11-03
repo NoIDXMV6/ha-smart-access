@@ -266,8 +266,11 @@ def test_session_rate_tracked(monkeypatch):
 # --- 7. Версии ----------------------------------------------------------------
 
 def test_versions_are_in_sync_v143():
+    """Версии аддона и интеграции синхронны (без пина к конкретной — точная
+    версия фиксируется в тесте соответствующего релиза, см. test_v144)."""
     import json
     addon = json.loads((CORE / "config.json").read_text(encoding="utf-8"))
     manifest = json.loads((CORE.parent / "custom_components" / "smart_access" /
                            "manifest.json").read_text(encoding="utf-8"))
-    assert addon["version"] == manifest["version"] == "1.4.3"
+    assert addon["version"] == manifest["version"]
+    assert tuple(int(x) for x in addon["version"].split(".")[:2]) >= (1, 4)

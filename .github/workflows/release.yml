@@ -69,17 +69,28 @@ jobs:
             echo "- **Интеграция (HACS):** HACS → Smart Access (умный допуск) → Обновить. Версия берётся из этого релиза."
             echo "- **Аддон Smart Access Core:** Настройки → Дополнения → Smart Access Core → Обновить. Образ: \`ghcr.io/noidxmv6/smart-access-core-{amd64,aarch64}:$V\` (сборка build-addon)."
             echo "- Ручная установка: архив \`smart-access-hacs.zip\` во вложениях, распаковать \`custom_components/smart_access\` в \`<config>/custom_components/\`."
+            echo "- Карточки дашборда: архив \`smart-access-cards.zip\` во вложениях или папка \`examples/cards/\` в репозитории (обновлённые карточки камер моста с кнопками «Открыть»/«Обучить»)."
           } > release_notes.md
           cat release_notes.md
 
       - name: Pack integration zip
         if: steps.tag.outputs.exists == 'false'
         run: |
-          V="${{ steps.ver.outputs.version }}"
           mkdir -p /tmp/pack/custom_components
           cp -r custom_components/smart_access /tmp/pack/custom_components/
+          # pytest (шаг выше) оставляет __pycache__/*.pyc — в релиз им нельзя
+          find /tmp/pack -name '__pycache__' -type d -prune -exec rm -rf {} +
+          find /tmp/pack -name '*.py[co]' -delete
           cd /tmp/pack
           zip -r "$GITHUB_WORKSPACE/smart-access-hacs.zip" custom_components
+
+      - name: Pack cards zip
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          mkdir -p /tmp/cards/examples
+          cp -r examples/cards /tmp/cards/examples/
+          cd /tmp/cards
+          zip -r "$GITHUB_WORKSPACE/smart-access-cards.zip" examples
 
       - name: Create tag and release
         if: steps.tag.outputs.exists == 'false'
@@ -96,4 +107,5 @@ jobs:
             --title "Smart Access v$V" \
             --notes-file release_notes.md \
             --latest \
-            smart-access-hacs.zip
+            smart-access-hacs.zip \
+            smart-access-cards.zip

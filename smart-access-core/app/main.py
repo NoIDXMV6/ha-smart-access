@@ -141,6 +141,10 @@ async def main() -> None:
                     "source": bridge.source.get(c["name"], ""),
                     "error": bridge.last_error.get(c["name"], ""),
                     "hint": bridge.hint(c["name"]),
+                    # v1.4.3: самовосстановление деградирующих сессий потока HA
+                    "recycles": bridge.recycles.get(c["name"], 0),
+                    "baseline_fps": bridge.baseline_fps.get(c["name"], 0.0),
+                    "session_rate": bridge.session_rate.get(c["name"], 0.0),
                 }
                 for c in conf.cameras
             },

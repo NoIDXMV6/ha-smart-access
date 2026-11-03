@@ -197,7 +197,7 @@ def open_camera_stream(entity_id: str):
     try:
         resp = requests.get(
             f"{cfg.supervisor_base()}/core/api/camera_proxy_stream/{entity_id}",
-            headers=_headers(), stream=True, timeout=(5, 30),
+            headers=_headers(), stream=True, timeout=(5, 20),
         )
     except requests.RequestException as exc:
         _warn_throttled(entity_id, f"поток HA недоступен: {_short_exc(exc)}")

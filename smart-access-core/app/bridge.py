@@ -42,6 +42,19 @@ multipart как RTSP. См. README «Карточки в HA».
 Отказоустойчивость: при недоступности источника поток отдаёт «заглушку»
 и продолжает попытки с бэкоффом (1→2→5→10→30 с); Frigate переживает
 паузы в потоке.
+
+v1.4.3 — САМОВОССТАНОВЛЕНИЕ ДОЛГИХ СЕССИЙ: наблюдение на реальном
+HAOS (prud/tatyanin_park/kalitka) — свежая сессия потока HA даёт
+1.3–1.5 fps, но через ~10 минут та же ЖИВАЯ сессия опускается до
+0.1 fps (кадр раз в 7–11 с): «сбоев: 0», подсказка «нормальный режим»,
+а во Frigate — застывшая картинка (мост тиражирует устаревший кадр).
+Сторож «молчит 30 с» на это не реагирует (байты формально идут),
+запасной снимок не включается (нет подряд сбоев). Теперь мост узнаёт
+рабочий темп камеры по началу сессии (baseline) и пересоздаёт
+соединение, как только темп сессии падает заметно ниже базового:
+свежая сессия снова даёт полные кадры. Пересоздание — НЕ сбой:
+счётчик «сбоев» не растёт, отдельный счётчик «пересозданий» и
+подсказка в панели показывают деградацию явно.
 """
 from __future__ import annotations
 
@@ -60,6 +73,10 @@ from . import ha_api
 LOG = logging.getLogger("smart_access.bridge")
 
 STUB = None  # lazy placeholder jpeg
+
+# Маркер ошибки «сессия жива, но темп упал ниже порога» — _stream_thread
+# отличает пересоздание (НЕ сбой) от настоящих отказов потока.
+LOW_FPS_MARK = "низкий fps сессии"
 
 
 def _placeholder_jpeg() -> bytes:
@@ -103,6 +120,17 @@ class Bridge:
         self._feeder: dict[str, asyncio.Task] = {}
         self._stop: dict[str, threading.Event] = {}
         self._last_client_ts: dict[str, float] = {}
+        # v1.4.3: самовосстановление деградирующих сессий потока HA
+        self.stream_silence = 25.0    # без ПОЛНОГО кадра столько секунд -> пересоздать
+        self.stream_warmup = 25.0     # от первого кадра сессии судим о темпе не раньше
+        self.recycle_min = 45.0       # минимальная пауза между пересозданиями (антишторм)
+        self.recycle_pause = 1.0      # обычная пауза перед свежим соединением после пересоздания
+        self.floor_fps = 0.15         # абсолютный минимум темпа полезной сессии
+        self.baseline_share = 0.35    # порог = max(floor, share * baseline)
+        self.baseline_fps: dict[str, float] = {}   # рабочий темп камеры (по началам сессий)
+        self.session_rate: dict[str, float] = {}   # текущий темп сессии (кадров/с)
+        self.recycles: dict[str, int] = {}         # пересозданий сессии
+        self.last_recycle_ts: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Конфигурация камер
@@ -121,11 +149,17 @@ class Bridge:
             self.source.setdefault(name, "")
             self.last_error.setdefault(name, "")
             self._last_client_ts.setdefault(name, 0.0)
+            self.baseline_fps.setdefault(name, 0.0)
+            self.session_rate.setdefault(name, 0.0)
+            self.recycles.setdefault(name, 0)
+            self.last_recycle_ts.setdefault(name, 0.0)
         for gone in [n for n in list(self.fps) if n not in self.entities]:
             self._halt_feeder(gone)
             for d in (self.fps, self.last_frame_ts, self.frames, self.failures,
                       self.latest, self.mode, self.source, self.last_error,
-                      self._last_client_ts, self.rtsp_urls):
+                      self._last_client_ts, self.rtsp_urls,
+                      self.baseline_fps, self.session_rate, self.recycles,
+                      self.last_recycle_ts):
                 d.pop(gone, None)
 
     def url(self, name: str) -> str:
@@ -324,6 +358,13 @@ class Bridge:
         работают, кадры берём снимком — камера НЕ остаётся без кадров,
         пока endpoint потока чинится (реальный случай: prud, сбоев 11
         за 10 минут, fps ронялся до нуля на паузах бэкоффа).
+
+        v1.4.3 — САМОВОССТАНОВЛЕНИЕ: сессия может оставаться живой, но
+        вырождаться по темпу (1.3–1.5 fps после старта -> 0.1 fps через
+        ~10 минут, при «сбоев: 0»). _stream_once помечает такую сессию
+        LOW_FPS_MARK — это НЕ сбой: счётчик «сбоев» не растёт, бэкофф не
+        включается, соединение пересоздаётся сразу (с антиштормовой
+        паузой recycle_min), а baseline автокалибруется по рабочим сессиям.
         """
         backoff = 1.0
         consec_fails = 0
@@ -337,10 +378,18 @@ class Bridge:
                 if not got_frame and err:
                     self._fail(name, err)
             except Exception as exc:  # noqa: BLE001
-                self._fail(name, f"поток HA: {ha_api._short_exc(exc)}")
+                err = f"поток HA: {ha_api._short_exc(exc)}"
+                self._fail(name, err)
                 got_frame = False
             if stop.is_set():
                 return
+            if err.startswith(LOW_FPS_MARK):
+                # Сессия жива, но деградировала: пересоздаём соединение.
+                # Это штатная процедура самовосстановления, а не сбой.
+                pause = self._handle_low_fps(name, err)
+                if stop.wait(pause):
+                    return
+                continue
             if got_frame:
                 backoff = 1.0
                 consec_fails = 0
@@ -362,16 +411,49 @@ class Bridge:
                 return
             backoff = min(30.0, backoff * 2)
 
+    def _handle_low_fps(self, name: str, err: str) -> float:
+        """Учёт пересоздания деградировавшей сессии; возвращает паузу, с.
+
+        Не трогает счётчик «сбоев» — пересоздание НЕ сбой. Baseline
+        подтягиваем к наблюдаемому темпу: если источник стал медленнее
+        НАВСЕГДА, порог постепенно снизится и пересоздания прекратятся;
+        если деградация временная, свежая сессия быстро вернёт baseline
+        вверх (автокалибровка в _stream_once).
+        """
+        now = time.time()
+        since = now - self.last_recycle_ts.get(name, 0.0)
+        pause = self.recycle_pause if since >= self.recycle_min \
+            else (self.recycle_min - since)
+        self.recycles[name] = self.recycles.get(name, 0) + 1
+        self.last_recycle_ts[name] = now
+        base = self.baseline_fps.get(name, 0.0)
+        rate = self.session_rate.get(name, 0.0)
+        if base > 0.0:
+            self.baseline_fps[name] = round(0.8 * base + 0.2 * rate, 3)
+        LOG.warning("Мост: «%s» — %s (пересоздание №%d, через %.0f с)",
+                    name, err, self.recycles[name], pause)
+        return pause
+
     def _stream_once(self, name: str, entity: str,
                      stop: threading.Event) -> tuple[bool, str]:
         """Одна сессия потока HA: (был_кадр, причина_отказа).
 
         Читает multipart-MJPEG, вырезает полные JPEG (SOI…EOI), обновляет
-        latest. 30 с без данных — обрываем сессию и переподключаемся.
+        latest. Два сторожа:
+        * тишина: STREAM_SILENCE секунд без ПОЛНОГО кадра — обрываем сессию
+          (байты могут идти, а кадра нет — тоже повод пересоздать);
+        * деградация темпа (v1.4.3): после разогрева (STREAM_WARMUP от
+          первого кадра) темп сессии ниже max(FLOOR_FPS,
+          BASELINE_SHARE * baseline) — сессия помечается LOW_FPS_MARK и
+          _stream_thread пересоздаёт соединение. baseline — рабочий темп
+          этой камеры, измеренный по успешным сессиям; автокалибруется:
+          растёт от быстрых сессий, спадает при пересозданиях.
         """
         resp = ha_api.open_camera_stream(entity)
         if resp is None:
             return False, "поток HA недоступен"
+        first_frame = 0.0
+        frames = 0
         try:
             buf = b""
             last_frame = time.time()
@@ -387,11 +469,28 @@ class Bridge:
                         buf = buf[eoi + 2:]
                         self._accept(name, jpg, "stream")
                         got = True
+                        frames += 1
+                        if not first_frame:
+                            first_frame = time.time()
                         last_frame = time.time()
                     elif len(buf) > 8_000_000:
                         buf = b""
-                if time.time() - last_frame > 30.0:
-                    return got, "поток HA молчит 30 с"
+                now = time.time()
+                if now - last_frame > self.stream_silence:
+                    return got, f"поток HA молчит {self.stream_silence:.0f} с"
+                if first_frame and now > first_frame:
+                    age = now - first_frame
+                    rate = frames / age
+                    self.session_rate[name] = round(rate, 3)
+                    if age > self.stream_warmup:
+                        base = self.baseline_fps.get(name, 0.0)
+                        limit = max(self.floor_fps, self.baseline_share * base)
+                        if base > 0.0 and rate < limit:
+                            return got, (f"{LOW_FPS_MARK} {rate:.2f} < {limit:.2f} "
+                                         f"(baseline {base:.2f}) — пересоздаю соединение")
+                        if frames >= 8 and rate > base:
+                            # автокалибровка baseline вверх по удачным сессиям
+                            self.baseline_fps[name] = round(base * 0.7 + rate * 0.3, 3)
             return got, ("" if got else "поток не отдал кадра")
         finally:
             resp.close()
@@ -451,6 +550,15 @@ class Bridge:
         err = self.last_error.get(name, "")
         if failures == 0 and self.fps.get(name, 0) > 0:
             if mode == "stream":
+                # v1.4.3: живая, но выродившаяся сессия — не «нормальный режим»
+                base = self.baseline_fps.get(name, 0.0)
+                cur = self.fps.get(name, 0.0)
+                if self.recycles.get(name, 0) and base > 0.0 \
+                        and cur < max(self.floor_fps, self.baseline_share * base):
+                    return (f"Поток HA деградирует: fps упал до {cur:.2f} при рабочем "
+                            f"темпе камеры ~{base:.2f} — мост автоматически пересоздаёт "
+                            f"соединение ({self.recycles[name]} раз). Для независимости "
+                            "от HA впишите камере rtsp_url.")
                 return ("Камера без быстрых одиночных снимков: мост держит ОДНО "
                         "постоянное соединение к потоку HA — это нормальный режим "
                         "(клиентов камеры: 1). Для независимости от HA впишите "

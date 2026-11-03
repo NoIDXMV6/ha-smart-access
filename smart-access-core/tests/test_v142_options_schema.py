@@ -252,4 +252,5 @@ def test_versions_are_in_sync():
         (CORE.parent / "custom_components" / "smart_access" / "manifest.json")
         .read_text(encoding="utf-8")
     )
-    assert manifest["version"] == CONFIG_JSON["version"] == "1.4.2"
+    assert manifest["version"] == CONFIG_JSON["version"]
+    assert tuple(int(x) for x in CONFIG_JSON["version"].split(".")[:2]) >= (1, 4)

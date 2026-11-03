@@ -223,10 +223,14 @@ def test_integration_modules_compile():
 
 
 def test_versions_in_sync_v141():
+    """Версии аддона и интеграции синхронны (без пина к конкретной — точная
+    версия фиксируется в тесте соответствующего релиза, см. test_v142)."""
     addon = json.load(open(CORE / "config.json", encoding="utf-8"))
     manifest = json.load(open(REPO / "custom_components" / "smart_access" / "manifest.json",
                               encoding="utf-8"))
-    assert addon["version"] == manifest["version"] == "1.4.1"
+    assert addon["version"] == manifest["version"]
+    # семантическое версионирование: не откатываемся ниже релиза с enroll-фидбеком
+    assert tuple(int(x) for x in addon["version"].split(".")[:2]) >= (1, 4)
 
 
 def test_ui_auto_refresh_and_failed_pill():

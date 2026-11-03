@@ -119,6 +119,57 @@ def _read_options() -> dict[str, Any]:
     return merge(defaults, user or {})
 
 
+# ---------------------------------------------------------------------------
+# v1.4.2: пороги нормализуются ПРИЛОЖЕНИЕМ, а не схемой Supervisor'а.
+#
+# Баг (реальный случай): «Не удалось сохранить: value must be at most 0.95.
+# Got {...}» — в схеме аддона у порогов стояли тесные верхние границы
+# (car_threshold/gestures.threshold float(0.5,0.95), face_threshold
+# float(0.2,0.6), car_gray_zone float(0.01,0.2)); одно значение выше максимума
+# (пользователь поднял порог машины до 0.96–1.0) блокировало сохранение ВСЕЙ
+# конфигурации. Это тот же класс бага, что «at most 3.0» в v1.3.1. Теперь в
+# схеме аддона пороги без границ ("float?"), а рабочий диапазон поддерживается
+# здесь: значение > 1 трактуется как проценты (76 -> 0.76), затем клэмп в
+# диапазон ниже + WARNING в журнал аддона.
+# ---------------------------------------------------------------------------
+_THRESHOLD_BANDS: dict[tuple[str, str], tuple[float, float]] = {
+    ("recognition", "car_threshold"): (0.5, 0.95),
+    ("recognition", "car_gray_zone"): (0.01, 0.2),
+    ("recognition", "face_threshold"): (0.2, 0.6),
+    ("gestures", "threshold"): (0.5, 0.95),
+}
+
+
+def normalize_thresholds(sections: dict[str, Any]) -> None:
+    """Приводит пороги распознавания к рабочим диапазонам на месте.
+
+    Значение > 1 считается процентами («76» -> 0.76), затем значение клэмпится
+    в рабочий диапазон (_THRESHOLD_BANDS). Каждое исправление — WARNING в
+    журнал, чтобы effective-значение не менялось молча.
+    """
+    for (sec, key), (lo, hi) in _THRESHOLD_BANDS.items():
+        d = sections.get(sec)
+        if not isinstance(d, dict) or key not in d:
+            continue
+        raw = d[key]
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            LOG.warning("Порог %s.%s=%r не число — использую нижнюю границу %s",
+                        sec, key, raw, lo)
+            d[key] = lo
+            continue
+        note = ""
+        if v > 1.0:
+            v /= 100.0
+            note = f" (значение {raw:g} > 1 трактовано как проценты)"
+        clamped = min(max(v, lo), hi)
+        if clamped != float(raw):
+            LOG.warning("Порог %s.%s=%g вне рабочего диапазона %g–%g — приведён к %g%s",
+                        sec, key, float(raw), lo, hi, clamped, note)
+        d[key] = round(clamped, 4)
+
+
 def slugify_camera_name(name: str) -> str:
     """Имя камеры в формате Frigate: только [a-z0-9_].
 
@@ -196,6 +247,10 @@ class Config:
         self.vlm: dict[str, Any] = opts["vlm"]
         self.gestures: dict[str, Any] = opts.get("gestures") or {"enabled": False, "min_frames": 1}
         self.alarm: dict[str, Any] = opts.get("alarm") or {}
+
+        # v1.4.2: пороги без границ в схеме Supervisor'а — нормализуем здесь
+        # (проценты -> доли, клэмп в рабочий диапазон, WARNING в журнал).
+        normalize_thresholds({"recognition": self.recognition, "gestures": self.gestures})
 
         # /data/settings.json — переключатели из панели (переживают
         # перенастройку аддона, как master.json). Не None -> переопределяем.

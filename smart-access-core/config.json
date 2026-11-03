@@ -1,6 +1,6 @@
 {
   "name": "Smart Access Core",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "slug": "smart-access-core",
   "description": "Умный допуск на одной VM с HAOS: авто-открытие шлагбаумов по своим машинам и калитки по лицам (с настраиваемыми по каждому лицу жестами и тревогой). LLM — только внешний URL+token+модель (опционально).",
   "url": "https://github.com/NoIDXMV6/ha-smart-access",
@@ -117,9 +117,9 @@
       }
     ],
     "recognition": {
-      "car_threshold": "float(0.5,0.95)?",
-      "car_gray_zone": "float(0.01,0.2)?",
-      "face_threshold": "float(0.2,0.6)?",
+      "car_threshold": "float?",
+      "car_gray_zone": "float?",
+      "face_threshold": "float?",
       "min_confirm_frames": "int(1,)?",
       "bridge_fps": "float(0.1,)?",
       "stream_fps": "float(0.5,)?",
@@ -136,7 +136,7 @@
     "gestures": {
       "enabled": "bool?",
       "min_frames": "int(1,)?",
-      "threshold": "float(0.5,0.95)?",
+      "threshold": "float?",
       "default_confirm": [
         "list(touch_nose|touch_ear|victory|ok|thumbs_up|thumbs_down|palm|one_hand_up|both_hands_up)?"
       ],
@@ -149,7 +149,7 @@
       "addon": "str?",
       "numbers": "str?",
       "sip_account": "int(1,)?",
-      "ring_timeout": "int(5,)?",
+      "ring_timeout": "int(1,)?",
       "language": "str?",
       "message_template": "str?",
       "notify": "bool?"

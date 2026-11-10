@@ -380,7 +380,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         from .brand import BrandIconView
 
-        hass.http.register_view(BrandIconView())
+        hass.http.register_view(BrandIconView(hass))
     except Exception as exc:  # noqa: BLE001
         LOG.debug("Brand view не зарегистрирован: %s", exc)
 

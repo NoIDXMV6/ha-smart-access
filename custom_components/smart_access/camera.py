@@ -189,7 +189,7 @@ class _BridgeEntitySync:
             if not self.known and not self.got_cameras:
                 LOG.warning(
                     "Сайт аддона Smart Access отвечает, но /api/status не содержит "
-                    "камер (bridge: {}) — камеры не настроены в аддоне"
+                    "камер (bridge: %s) — камеры не настроены в аддоне", bridge
                 )
             return
         self._probe_fails += 1
